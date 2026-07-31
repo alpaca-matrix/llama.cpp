@@ -29,10 +29,12 @@ Ranked by measured effect:
 | Change | Effect |
 |---|---|
 | MTP speculative decoding (`spec-type = draft-mtp`) | +35-45% generation on code |
+| `spec-draft-n-max = 6` (default 3) | +32% generation on top of MTP; 8 regresses |
 | Mesa 25.2.8 -> 26.1.6 (kisak PPA) | +13-22% prompt processing |
 | `ubatch-size = 2048` (retune after Mesa change) | +10-20% on long prompts |
 | KV cache `q8_0` | +5-7% generation, half the KV memory |
 | `ttm.pages_limit` raise | unlocks models >39 GiB |
+| `parallel = 2` + `kv-unified` + `cache-ram` | keeps agent prefix cached across interleaved requests |
 
 Note the second and third interact: the optimal ubatch changed when Mesa was
 upgraded. Retune ubatch after any driver change.
@@ -46,6 +48,8 @@ Do not spend time on these; all measured zero or negative on this hardware.
 | `GGML_VULKAN_INTEGER_DOT` via newer glslc | 0% - coopmat path dominates |
 | `GGML_HIP_ROCWMMA_FATTN=ON` | 0% - does not activate on RDNA3 |
 | `--load-mode mlock` / `mmap` variants | 0% - irrelevant under full GPU offload |
+| `power_dpm_force_performance_level=high` (host) | 0-1% - auto DPM already ramps fully under load |
+| `ctx-checkpoints` / `checkpoint-min-step` tuning | not needed - identical-prefix restore reprocesses ~15 tok |
 | Draft-model speculation (Qwen3.5-0.8B) | 0% - never engages on hybrid arch |
 | `spec-type ngram-*` (all variants) | 0 to -4% with varied prompts |
 | ROCm/HIP backend | wins pp by 7-11%, loses tg by 11-21%, caps at 39 GiB |
@@ -124,3 +128,50 @@ answer, so a small budget returns empty content with `finish_reason: length`.
 
 `models-max = 1` swaps on demand rather than co-residing: gpt-oss alone is 59 GiB
 of the 76 GiB pool. Swap cost is ~31 s for gpt-oss, ~14 s for the 35B.
+
+## Serving agent clients (Claude Code, OpenCode)
+
+The server exposes both OpenAI (`/v1/chat/completions`) and Anthropic
+(`/v1/messages`, `/v1/messages/count_tokens`) APIs. Tool use, streaming and
+`cache_control` blocks all work, so Claude Code runs against it directly.
+
+Agent clients interleave one large growing conversation with small background
+requests (title generation, summarization). With a single slot those evict the
+main prefix and every turn reprocesses the full context. Three settings fix it:
+
+- `parallel = 2` - background requests land on the second slot
+- `kv-unified = true` - both slots share the full ctx-size pool instead of splitting it
+- `cache-ram = 16384` - displaced prefixes restore from RAM instead of reprocessing
+
+Measured with an 11k-token prompt interleaved with a small request: 9k of 11k
+tokens restored from cache. Generation on code: 32 t/s (MTP unaffected by the
+second slot). Fresh prompt processing: 313 t/s, so a cold 25k-token agent
+system prompt costs ~80 s once, then stays cached.
+
+Claude Code setup (PowerShell; bash equivalent with `export`):
+
+```powershell
+$env:ANTHROPIC_BASE_URL       = "http://192.168.254.250:8080"
+$env:ANTHROPIC_AUTH_TOKEN     = "local"
+$env:ANTHROPIC_MODEL          = "fast"
+$env:ANTHROPIC_SMALL_FAST_MODEL = "fast"
+claude
+```
+
+Keep `ANTHROPIC_SMALL_FAST_MODEL` on the **same alias** as the main model:
+with `models-max = 1`, pointing it at a different model forces a 14-31 s model
+swap on every background request.
+
+OpenCode (`~/.config/opencode/opencode.json`):
+
+```jsonc
+{
+  "provider": {
+    "llamacpp": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "http://192.168.254.250:8080/v1" },
+      "models": { "fast": {}, "deep": {} }
+    }
+  }
+}
+```
