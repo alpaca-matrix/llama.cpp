@@ -141,6 +141,10 @@ answer, so a small budget returns empty content with `finish_reason: length`.
 `models-max = 1` swaps on demand rather than co-residing: gpt-oss alone is 59 GiB
 of the 76 GiB pool. Swap cost is ~31 s for gpt-oss, ~14 s for the 35B.
 
+Known quirk: the first request right after `systemctl restart` can fail with a
+500 (`vk::DeviceLostError` during child load - a teardown/load race, no kernel
+GPU reset involved). The router recovers on the next request; retry once.
+
 ## Serving agent clients (Claude Code, OpenCode)
 
 The server exposes both OpenAI (`/v1/chat/completions`) and Anthropic
