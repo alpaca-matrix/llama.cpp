@@ -54,6 +54,24 @@ Do not spend time on these; all measured zero or negative on this hardware.
 | Vulkan: raise the `mul_mat_id` vector-path threshold | no gain at our draft length (see below) |
 | `models-max = 2` to co-resident two models | OOM-killed under load (see below) |
 | Qwen3-Next-80B-A3B-Thinking as `deep` | less accurate and slower than gpt-oss-120b |
+| Ternary-Bonsai-27B (Q2_0_g128) | will not load - needs the vendor fork, kernels are CUDA/Metal only |
+
+### On ternary quants
+
+Ternary looks made for this hardware - 27B-class weights in 6.7 GiB is exactly
+the byte-per-parameter reduction a bandwidth-bound iGPU wants, and the published
+scores are strong (80.49 across 15 thinking benchmarks, coding 85.96). It does
+not work here, for reasons worth recording before the next one comes along.
+
+The file is `Q2_0_g128`, a group-128 layout that is not upstream `Q2_0` despite
+the name, so stock llama.cpp fails at load with a tensor offset mismatch
+(`output_norm.weight has offset 337715200, expected 357580800`) rather than an
+unsupported-type error. The checksum verifies - the file is fine, the format is
+simply different. Beyond that, the vendor states the low-bit kernels exist for
+CUDA and Metal only, so even on their fork there is no Vulkan path.
+
+Worth re-checking if upstream ever lands ternary Vulkan kernels; the shape of
+the win is real, only the plumbing is missing.
 
 ### Replacing the deep slot
 
