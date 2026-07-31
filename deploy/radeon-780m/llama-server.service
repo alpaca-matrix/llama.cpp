@@ -1,0 +1,19 @@
+[Unit]
+Description=llama.cpp router (Radeon 780M / Vulkan)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/root/llama.cpp/build-vk2/bin/llama-server \
+  --models-preset /etc/llama/router.ini \
+  --models-max 1 \
+  --host 0.0.0.0 --port 8080 \
+  --metrics
+Restart=on-failure
+RestartSec=5
+LimitMEMLOCK=infinity
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
