@@ -15,6 +15,11 @@ import base64, json, os, struct, urllib.request, zlib
 
 alias, host = os.environ["ALIAS"], os.environ["HOST"]
 
+# Thinking models emit reasoning before the answer, so a small budget returns
+# empty content and looks exactly like a capability failure. 200 tokens was
+# enough to make `fast` appear to have no tool support at all.
+MAX_TOK = 1200
+
 def post(path, payload, timeout=600):
     req = urllib.request.Request(host + path, data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"})
@@ -34,7 +39,7 @@ tools = [{
     },
 }]
 r = post("/v1/chat/completions", {
-    "model": alias, "max_tokens": 200, "tools": tools, "temperature": 0,
+    "model": alias, "max_tokens": MAX_TOK, "tools": tools, "temperature": 0,
     "messages": [{"role": "user", "content": "What is the weather in Manila right now?"}],
 })
 msg = r["choices"][0]["message"]
@@ -65,7 +70,7 @@ b64 = base64.b64encode(png).decode()
 
 try:
     r = post("/v1/chat/completions", {
-        "model": alias, "max_tokens": 200, "temperature": 0,
+        "model": alias, "max_tokens": MAX_TOK, "temperature": 0,
         "messages": [{"role": "user", "content": [
             {"type": "text", "text": "This image has four quadrants. Name the colour of each, top-left first."},
             {"type": "image_url", "image_url": {"url": "data:image/png;base64," + b64}},
