@@ -50,6 +50,58 @@ Do not spend time on these; all measured zero or negative on this hardware.
 | `--load-mode mlock` / `mmap` variants | 0% - irrelevant under full GPU offload |
 | `power_dpm_force_performance_level=high` (host) | 0-1% - auto DPM already ramps fully under load |
 | `ctx-checkpoints` / `checkpoint-min-step` tuning | not needed - identical-prefix restore reprocesses ~15 tok |
+| Vulkan: add an RDNA3 entry to `gpu_pipeline_configs` | tg flat, pp -2% |
+| Vulkan: raise the `mul_mat_id` vector-path threshold | no gain at our draft length (see below) |
+
+### Code-level attempts (Vulkan backend)
+
+Two source changes were built and measured against this hardware. Neither is
+applied; both are recorded so they are not retried blind.
+
+**RDNA3 subgroup size.** `gpu_pipeline_configs` in `ggml-vulkan.cpp` has entries
+for RDNA1 and RDNA2 but none for RDNA3, so `get_subgroup_size` returns 0 and the
+device falls back to RADV's reported 64 - where RDNA2 would have been pinned to
+`RDNA_DEFAULT_SUBGROUP_SIZE` (32). Adding a matching RDNA3 entry does change the
+device to wave32 (`warp size: 32` in the banner), but measured tg 18.47 vs 18.53
+and pp 222 vs 227. RADV already picks a good wave size per shader.
+
+**MoE vector-path threshold.** `ggml_vk_use_mul_mat_vec_id` selects the matvec
+path only when `src2->ne[1] <= 8`; above that it uses the matrix path. The matvec
+path loops over tokens, one dispatch each, so its cost is linear in batch size -
+`MUL_MAT_ID(q4_K, n_used=8)` measures a flat 88-95 us/token from n=1 to n=32,
+and only improves past n=128. A 9-token speculative batch therefore crosses into
+the matrix path, which is why `spec-draft-n-max = 8` regressed. Raising the
+threshold to 32 does recover that case (19.5 -> 21.3 t/s at n-max 8), but n-max 4
+stays faster than either, so the change buys nothing at the draft length we run.
+
+### Watch for silent CPU fallback
+
+If throughput drops several-fold, check the backend before trusting any other
+measurement. When Vulkan fails to initialise, llama.cpp does not error - it
+falls back to CPU and keeps serving at roughly a sixth of the speed. The tell is
+the backend column in `llama-bench` reading `CPU` instead of `Vulkan`:
+
+```sh
+llama-bench -m <model> -ngl 99 -p 512 -n 64 | grep -E "Vulkan|CPU"
+vulkaninfo --summary | grep -A1 deviceName     # RADV PHOENIX should be listed
+awk '{print $1/1073741824" GiB"}' /sys/class/drm/card0/device/mem_info_gtt_used
+```
+
+The cause seen here was GTT exhaustion: an orphaned `llama-server` child left in
+uninterruptible `D` state kept 38 GiB of GTT and 16 GiB of VRAM pinned, so RADV
+could no longer open `/dev/dri/renderD128` (`Cannot allocate memory`). Restarting
+the service while requests are in flight on the GPU is what produced the orphan.
+`SIGKILL` will not reap a `D`-state task, `pct stop` and `pct reboot` both hang
+on it, and an `amdgpu_gpu_recover` MODE2 reset succeeds at the device level
+(`device wedged, but recovered through reset`) without freeing the process. Only
+a hard power cycle cleared it.
+
+Degradation is progressive, not a cliff: pp on `coder` measured 213, then 200,
+then 184 t/s over the hour it took to wedge, and returned to 235 t/s after the
+reboot. Do not write off a slow downward drift as run-to-run variance - re-check
+the backend. Genuine repeat variance on an idle, healthy box is only a few
+percent, so prefer `llama-bench` (which reports stddev) for clean pp/tg numbers,
+and make sure nothing else is driving the server while sampling.
 | Draft-model speculation (Qwen3.5-0.8B) | 0% - never engages on hybrid arch |
 | `spec-type ngram-*` (all variants) | 0 to -4% with varied prompts |
 | ROCm/HIP backend | wins pp by 7-11%, loses tg by 11-21%, caps at 39 GiB |
@@ -112,6 +164,15 @@ still benchmarks at full speed, it just emits garbage.
 |---|---|---|
 | `fast` | Qwen3.6-35B-A3B-MTP UD-Q4_K_XL | MTP head enables +35-45% speculation |
 | `coder` | Qwen3-Coder-Next UD-Q4_K_XL + DFlash drafter | SWE-bench Verified 70.6 at 3B active; best agentic quality that fits |
+
+`coder` is arch `qwen3next`: a hybrid of 48 blocks where only every 4th is full
+attention (`full_attention_interval = 4`) and the other 36 are Gated Delta Net
+linear-attention layers, over 512 experts with 10 used. The GDN op is the reason
+speculation pays here beyond the usual: `GATED_DELTA_NET(head_count=32,
+head_size=128)` costs 64 us at one token but 3.6 us/token at 64 tokens, because
+the 4.2 MB of per-layer recurrent state is read and written once per call
+regardless of batch size. Clean `llama-bench` figures: pp512 227 t/s, tg64 18.5 t/s.
+Served with the DFlash drafter on a healthy box: pp 235 t/s, tg 25 t/s.
 | `deep` | gpt-oss-120b MXFP4 | 117B/5.1B active, native `reasoning_effort` |
 
 Measured on `coder` (80B-A3B, 46 GiB): pp ~210 t/s, tg 18 t/s base, 25 t/s with
@@ -141,9 +202,13 @@ answer, so a small budget returns empty content with `finish_reason: length`.
 `models-max = 1` swaps on demand rather than co-residing: gpt-oss alone is 59 GiB
 of the 76 GiB pool. Swap cost is ~31 s for gpt-oss, ~14 s for the 35B.
 
-Known quirk: the first request right after `systemctl restart` can fail with a
-500 (`vk::DeviceLostError` during child load - a teardown/load race, no kernel
-GPU reset involved). The router recovers on the next request; retry once.
+Restart the service only when it is idle. A `systemctl restart` with requests in
+flight can leave the model child process wedged in the GPU driver, and a
+`vk::DeviceLostError` on the first request afterwards is the early warning: it
+means the previous instance did not tear down cleanly. Do not simply retry past
+it - check `mem_info_gtt_used` has returned to ~0 with the service stopped,
+because a leaked child pins the whole pool and eventually forces CPU fallback
+(see "Watch for silent CPU fallback").
 
 ## Serving agent clients (Claude Code, OpenCode)
 
