@@ -52,6 +52,34 @@ Do not spend time on these; all measured zero or negative on this hardware.
 | `ctx-checkpoints` / `checkpoint-min-step` tuning | not needed - identical-prefix restore reprocesses ~15 tok |
 | Vulkan: add an RDNA3 entry to `gpu_pipeline_configs` | tg flat, pp -2% |
 | Vulkan: raise the `mul_mat_id` vector-path threshold | no gain at our draft length (see below) |
+| `models-max = 2` to co-resident two models | OOM-killed under load (see below) |
+| Qwen3-Next-80B-A3B-Thinking as `deep` | less accurate and slower than gpt-oss-120b |
+
+### Replacing the deep slot
+
+Qwen3-Next-80B-A3B-Thinking Q5_K_XL looked like the obvious upgrade - same
+`qwen3next` arch as `coder`, native thinking, 262K ctx, 52.8 GiB against
+gpt-oss's 60.4, and 3B active against 5.1B. Measured, it loses on both axes:
+
+| | gpt-oss-120b | Qwen3-Next-80B-A3B-Thinking |
+|---|---|---|
+| `reason-eval.sh` | 8/8 | 7/8 |
+| reasoning emitted | 15.4k chars | 27.2k chars |
+| pp | 242 t/s | 176 t/s |
+| tg | 19.6 t/s | 20.5 t/s |
+| swap-in | 66 s | 62 s |
+
+It spends nearly twice the reasoning to reach a worse answer, and 27% slower
+prefill outweighs 4% faster generation on the long prompts this slot sees.
+Fewer active parameters did not translate into speed here: the hybrid GDN
+layers prefill poorly, and Q5_K_XL reads more bytes per weight than MXFP4.
+
+### Co-residency
+
+`models-max = 2` does work - `coder` plus `assist` fit, and switching drops
+from 14-40 s to under 4 s. It is still not worth it: GTT sits at 59.2 of
+60 GiB, prompt processing falls 32% (235 -> 159 t/s), and a 9k-token prompt
+OOM-killed the service. Keep `models-max = 1` and pay the swap.
 
 ### Code-level attempts (Vulkan backend)
 
