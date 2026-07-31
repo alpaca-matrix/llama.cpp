@@ -1,6 +1,6 @@
 # Launch Claude Code against the local llama-server router.
 # Usage: .\claude-local.ps1 [fast|deep] [extra claude args...]
-param([string]$Model = "fast")
+param([string]$Model = "coder")
 
 $env:ANTHROPIC_BASE_URL         = "http://192.168.254.250:8080"
 $env:ANTHROPIC_AUTH_TOKEN       = "local"

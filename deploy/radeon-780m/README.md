@@ -111,7 +111,19 @@ still benchmarks at full speed, it just emits garbage.
 | Slot | Model | Why |
 |---|---|---|
 | `fast` | Qwen3.6-35B-A3B-MTP UD-Q4_K_XL | MTP head enables +35-45% speculation |
+| `coder` | Qwen3-Coder-Next UD-Q4_K_XL + DFlash drafter | SWE-bench Verified 70.6 at 3B active; best agentic quality that fits |
 | `deep` | gpt-oss-120b MXFP4 | 117B/5.1B active, native `reasoning_effort` |
+
+Measured on `coder` (80B-A3B, 46 GiB): pp ~210 t/s, tg 18 t/s base, 25 t/s with
+the DFlash drafter (`spec-type = draft-dflash`, 88% acceptance at n-max 3-4).
+Draft length above 4 regresses even though more tokens are accepted: on MoE,
+each verified token routes to different experts, so verify bandwidth grows with
+draft length. This is the opposite of dense models - keep MoE drafts short.
+
+ubatch 2048 is optimal for `coder` too (1024 and 4096 both measure ~180 t/s pp
+vs 213 at 2048). `cache-ram` is a cap, not an allocation, and GTT weights do
+not count against the container cgroup, so `fast`/`coder` carry a higher cap
+(24576) than `deep`, whose 59 GiB GTT leaves less physical host RAM.
 
 Both expose a thinking toggle, so one endpoint covers quick edits and deep
 analysis:
@@ -153,8 +165,8 @@ Claude Code setup (PowerShell; bash equivalent with `export`):
 ```powershell
 $env:ANTHROPIC_BASE_URL       = "http://192.168.254.250:8080"
 $env:ANTHROPIC_AUTH_TOKEN     = "local"
-$env:ANTHROPIC_MODEL          = "fast"
-$env:ANTHROPIC_SMALL_FAST_MODEL = "fast"
+$env:ANTHROPIC_MODEL          = "coder"
+$env:ANTHROPIC_SMALL_FAST_MODEL = "coder"
 claude
 ```
 
