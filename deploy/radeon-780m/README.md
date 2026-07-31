@@ -251,7 +251,7 @@ still benchmarks at full speed, it just emits garbage.
 
 | Slot | Model | Why |
 |---|---|---|
-| `fast` | Qwen3.6-35B-A3B-MTP UD-Q4_K_XL | MTP head enables +35-45% speculation |
+| `fast` | Ornith-1.0-35B MTP-APEX + mmproj | all-rounder: reasoning, vision and tools in 21.9 GiB |
 | `assist` | Qwen3-VL-30B-A3B-Instruct UD-Q4_K_XL + mmproj | only alias with vision; 32 t/s, 256K ctx |
 | `coder` | Qwen3-Coder-Next UD-Q4_K_XL + DFlash drafter | SWE-bench Verified 70.6 at 3B active; best agentic quality that fits |
 
@@ -294,11 +294,11 @@ missing tool support. `check-vision-tools.sh` budgets 1200 for that reason.
 
 ### Picking a slot
 
-`assist` is the one to point Hermes Agent at: it is the only alias that can take
-an image, which Hermes needs for its screenshot tooling, and at 32 t/s it is
-close to `fast` while carrying 256K of context. It has no separate reasoning
-channel, so send genuine analysis to `fast` (thinking toggle) or `deep`
-(`reasoning_effort`). Verify any new model with:
+Point Hermes Agent at `fast`: it takes images, which Hermes needs for its
+screenshot tooling, and it reasons and calls tools in the same model. `assist`
+remains the alternative when prompt processing dominates - it prefills 24%
+faster, which tells on the very long contexts an agent accumulates, but it has
+no reasoning channel of its own. Verify any new model with:
 
 ```sh
 ./check-vision-tools.sh assist    # tool calling + image input
@@ -307,12 +307,20 @@ channel, so send genuine analysis to `fast` (thinking toggle) or `deep`
 
 Measured on this hardware, generation with a 2.4k-token prompt:
 
-| alias | tg | vision | tools | reasoning channel |
-|---|---|---|---|---|
-| `fast` | 37 t/s | no | yes | yes (toggle) |
-| `assist` | 32 t/s | yes | yes | no |
-| `coder` | 25 t/s | no | yes | no |
-| `deep` | 20 t/s | no | yes | yes (`reasoning_effort`) |
+| alias | pp | tg | vision | tools | reasoning |
+|---|---|---|---|---|---|
+| `fast` | 317 t/s | 34.6 t/s | yes | yes | yes, 8/8 in 190 s |
+| `assist` | 394 t/s | 32 t/s | yes | yes | no |
+| `coder` | 235 t/s | 25 t/s | no | yes | no |
+| `deep` | 242 t/s | 19.6 t/s | no | yes | yes, 8/8 in 279 s |
+
+`fast` is now the default choice for almost everything: it beats `coder` on
+every published SWE-bench variant while generating 38% faster in half the
+footprint, and matches `deep` on the reasoning eval in two thirds the time from
+a third of the size. `assist` is kept only for its prefill lead, which matters
+on the very large contexts an agent client builds up. Note the eval saturates -
+both `fast` and `deep` score 8/8 - so it cannot separate them on genuinely hard
+analysis, where `deep`'s 117B parameters may still tell.
 
 `models-max = 1` swaps on demand rather than co-residing: gpt-oss alone is 59 GiB
 of the 76 GiB pool. Swap cost is ~31 s for gpt-oss, ~14 s for the 35B.
