@@ -155,6 +155,26 @@ whose probe fails rather than erroring.
 
 ## Updating
 
+**This repo is the single source of truth.** Every change - `router.ini`, the
+systemd unit, the scripts - is edited here, committed, and only then copied to
+the server. Nothing is edited in place on the box. `/etc/llama/` and
+`/etc/systemd/system/` hold deployed copies, never originals, and
+`/root/llama.cpp` is a read-only mirror of this repo.
+
+Editing on the server instead costs you the record of why a value is what it is.
+Every number in `router.ini` was measured, and the reasoning lives in the commit
+that set it; a `sed` on the live file leaves a tuned system nobody can explain
+and a repo that lies about what is running.
+
+To check the box has not drifted:
+
+```sh
+git -C /root/llama.cpp status --short          # must be empty
+diff /root/llama.cpp/deploy/radeon-780m/router.ini /etc/llama/router.ini
+diff /root/llama.cpp/deploy/radeon-780m/llama-server.service \
+     /etc/systemd/system/llama-server.service
+```
+
 Updates are deliberate, not scheduled - nothing pulls automatically. The tuning
 in `router.ini` is measured against a specific llama.cpp build and Mesa version,
 so an unattended update can silently invalidate it.
@@ -175,8 +195,10 @@ systemctl stop llama-server
 git -C /root/llama.cpp pull --ff-only
 cd /root/llama.cpp/deploy/radeon-780m && ./build.sh
 cp router.ini /etc/llama/
+cp llama-server.service /etc/systemd/system/ && systemctl daemon-reload
 systemctl start llama-server
-./bench.sh                            # confirm ubatch 2048 is still optimal
+./bench.sh <model>                    # confirm ubatch 2048 is still optimal
+./probe-server.sh coder 6             # real serving speed, incl. speculation
 ```
 
 Three things to know:
