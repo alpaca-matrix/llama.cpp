@@ -41,9 +41,11 @@ TESTS = [
      "Together they hold 31 items. How many items are in Box B? Reply with just the number.",
      r"\b7\b", "boxes"),
 
+    # accept a bare numeral: "2" is a correct answer to "what position", and
+    # only matching the word form scored a right answer as wrong
     ("A race car driver overtakes the car in second place near the finish. "
      "What position is the driver in now? Reply with just the position.",
-     r"\bsecond\b|\b2nd\b", "overtake"),
+     r"\bsecond\b|\b2nd\b|\b2\b", "overtake"),
 
     ("Sally has 3 brothers. Each brother has 2 sisters. How many sisters does Sally have? "
      "Reply with just the number.",
