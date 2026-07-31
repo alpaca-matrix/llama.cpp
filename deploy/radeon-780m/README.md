@@ -224,6 +224,7 @@ still benchmarks at full speed, it just emits garbage.
 | Slot | Model | Why |
 |---|---|---|
 | `fast` | Qwen3.6-35B-A3B-MTP UD-Q4_K_XL | MTP head enables +35-45% speculation |
+| `assist` | Qwen3-VL-30B-A3B-Instruct UD-Q4_K_XL + mmproj | only alias with vision; 32 t/s, 256K ctx |
 | `coder` | Qwen3-Coder-Next UD-Q4_K_XL + DFlash drafter | SWE-bench Verified 70.6 at 3B active; best agentic quality that fits |
 
 `coder` is arch `qwen3next`: a hybrid of 48 blocks where only every 4th is full
@@ -259,6 +260,31 @@ analysis:
 
 Give thinking requests a generous `max_tokens`. Reasoning is emitted before the
 answer, so a small budget returns empty content with `finish_reason: length`.
+This also makes a working model look broken: at `max_tokens = 200`, `fast` spent
+159 tokens reasoning and returned no tool call at all, which reads exactly like
+missing tool support. `check-vision-tools.sh` budgets 1200 for that reason.
+
+### Picking a slot
+
+`assist` is the one to point Hermes Agent at: it is the only alias that can take
+an image, which Hermes needs for its screenshot tooling, and at 32 t/s it is
+close to `fast` while carrying 256K of context. It has no separate reasoning
+channel, so send genuine analysis to `fast` (thinking toggle) or `deep`
+(`reasoning_effort`). Verify any new model with:
+
+```sh
+./check-vision-tools.sh assist    # tool calling + image input
+./probe-server.sh assist 6        # real serving throughput
+```
+
+Measured on this hardware, generation with a 2.4k-token prompt:
+
+| alias | tg | vision | tools | reasoning channel |
+|---|---|---|---|---|
+| `fast` | 37 t/s | no | yes | yes (toggle) |
+| `assist` | 32 t/s | yes | yes | no |
+| `coder` | 25 t/s | no | yes | no |
+| `deep` | 20 t/s | no | yes | yes (`reasoning_effort`) |
 
 `models-max = 1` swaps on demand rather than co-residing: gpt-oss alone is 59 GiB
 of the 76 GiB pool. Swap cost is ~31 s for gpt-oss, ~14 s for the 35B.
