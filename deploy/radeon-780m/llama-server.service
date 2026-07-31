@@ -18,11 +18,13 @@ LimitNOFILE=65536
 # the router spawns a child per model that holds the GPU allocation. Killing it
 # mid-decode leaves it unkillable in D state with the whole GTT pool pinned,
 # which forces every later Vulkan init to fall back to CPU. Give the children
-# time to finish in-flight work, kill the whole cgroup rather than the router
-# alone, and never escalate to SIGKILL - it cannot reap a D-state task anyway.
+# a long window to finish in-flight GPU work, and stop the whole cgroup rather
+# than the router alone so no child is orphaned holding memory.
+# SendSIGKILL is deliberately left enabled: it cannot reap a D-state task, but
+# disabling it strands ordinary killable children that then block the next
+# start and keep the GTT pinned - which is the failure it was meant to prevent.
 KillMode=control-group
 TimeoutStopSec=120
-SendSIGKILL=no
 
 [Install]
 WantedBy=multi-user.target
