@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 ExecStart=/root/llama.cpp/build-vk2/bin/llama-server \
   --models-preset /etc/llama/router.ini \
-  --models-max 1 \
+  --models-max 2 \
   --host 0.0.0.0 --port 8080 \
   --metrics
 Restart=on-failure
