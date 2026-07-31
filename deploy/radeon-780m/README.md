@@ -153,6 +153,45 @@ systemctl daemon-reload && systemctl enable --now llama-server
 too old to compile several feature shaders, and CMake silently drops any feature
 whose probe fails rather than erroring.
 
+## Updating
+
+Updates are deliberate, not scheduled - nothing pulls automatically. The tuning
+in `router.ini` is measured against a specific llama.cpp build and Mesa version,
+so an unattended update can silently invalidate it.
+
+**Config only** (edited `router.ini` here, want it live). Safe any time:
+
+```sh
+git -C /root/llama.cpp pull --ff-only
+cp /root/llama.cpp/deploy/radeon-780m/router.ini /etc/llama/
+systemctl restart llama-server        # only when idle - see below
+```
+
+**Config plus new llama.cpp** (picking up upstream changes). Rebuild first, and
+budget time to re-measure afterwards:
+
+```sh
+systemctl stop llama-server
+git -C /root/llama.cpp pull --ff-only
+cd /root/llama.cpp/deploy/radeon-780m && ./build.sh
+cp router.ini /etc/llama/
+systemctl start llama-server
+./bench.sh                            # confirm ubatch 2048 is still optimal
+```
+
+Three things to know:
+
+- **Restart only when idle.** Tearing down mid-decode can wedge a model child in
+  the GPU driver; see "Watch for silent CPU fallback" for why that is expensive.
+  Check with `curl -s localhost:8080/slots`.
+- **Re-verify after any llama.cpp or Mesa change.** Optimal ubatch moved the last
+  time Mesa was upgraded, and the speculation settings are build-specific. A new
+  build is a reason to re-run `bench.sh`, not to assume the numbers hold.
+- **If the pull refuses**, the working tree has drifted (a stray `chmod` is the
+  usual cause). This checkout is a mirror and holds nothing you need - the live
+  config lives in `/etc/llama/` - so discard and retry:
+  `git -C /root/llama.cpp checkout -- . && git -C /root/llama.cpp pull --ff-only`
+
 ## Models
 
 Always verify checksums. Use `fetch-model.sh`, which checks the SHA256 from the
