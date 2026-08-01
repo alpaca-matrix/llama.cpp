@@ -56,6 +56,23 @@ Do not spend time on these; all measured zero or negative on this hardware.
 | Qwen3-Next-80B-A3B-Thinking as `deep` | less accurate and slower than gpt-oss-120b |
 | Ternary-Bonsai-27B (Q2_0_g128) | will not load - needs the vendor fork, kernels are CUDA/Metal only |
 
+### Dense models do not work here
+
+Three dense models were measured on this hardware, all coherent and all far too
+slow, because a dense model reads every parameter per token while the MoE models
+read 3-10 experts of 256:
+
+| model | size | speculation | tg |
+|---|---|---|---|
+| Qwopus3.6-27B-Fusion (dense 27B) | 15.7 GiB | none | **4.6 t/s** |
+| Fable-Fusion-711 (dense 27B) | 15.7 GiB | MTP, 0.66 acceptance | 8.3 t/s |
+| Defiant (dense 9B) | 8.2 GiB | MTP, 0.78 acceptance | 17.8 t/s |
+
+The two 27Bs share a base and a file size; the only difference is that one can
+speculate, and that is worth 1.8x. Against `fast` at 34.6 t/s from a 22 GiB MoE,
+none of them is competitive - the 27Bs are 4-7x slower from a *smaller* file.
+Treat "dense" as disqualifying on this box unless the weights are sub-2-bit.
+
 ### On ternary quants
 
 Ternary looks made for this hardware - 27B-class weights in 6.7 GiB is exactly
