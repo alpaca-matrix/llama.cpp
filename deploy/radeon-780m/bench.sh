@@ -14,8 +14,11 @@ UB="${UB:-2048}"
 KV="${KV:-q8_0}"
 
 echo "== environment =="
-vulkaninfo 2>/dev/null | grep -m1 driverInfo | sed 's/^\s*//'
-"$BIN/llama-bench" --list-devices 2>&1 | grep -E 'ggml_vulkan: 0|Vulkan0'
+# both pipelines are informational, and both can fail the script under pipefail:
+# grep -m1 closes the pipe and SIGPIPEs vulkaninfo (exit 141), and a grep that
+# matches nothing exits 1. Neither is a reason to abandon the benchmark.
+vulkaninfo 2>/dev/null | grep -m1 driverInfo | sed 's/^\s*//' || true
+"$BIN/llama-bench" --list-devices 2>&1 | grep -E 'ggml_vulkan: 0|Vulkan0' || true
 echo
 
 if pgrep -x llama-bench >/dev/null || pgrep -x aria2c >/dev/null; then

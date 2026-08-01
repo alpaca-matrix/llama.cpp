@@ -1,8 +1,8 @@
 # Model candidates
 
-Researched 2026-08-01. Nothing here has been measured on this box. This is a
-queue of things worth testing, ordered by expected value per hour of testing,
-not by model quality.
+Researched 2026-08-01. Candidates 1 and 2 were measured on this box the same
+day and **both were rejected**; their numbers and the reasons are in "Measured
+and rejected" below. Step-3.5-Flash is the only entry still untested.
 
 Read `README.md` first. Everything in "Tested and rejected" there is out of
 scope and must not be re-proposed.
@@ -15,99 +15,172 @@ Every estimate below starts as a bandwidth ceiling:
 tg_ceiling = 74 GB/s / (active_params x bytes_per_param)
 ```
 
-That ceiling is never reached. Checked against the three models actually
-measured on this hardware:
+That ceiling is never reached. Checked against the five models now measured on
+this hardware:
 
 | model | active | bytes/param | ceiling | measured base tg | ratio |
 |---|---|---|---|---|---|
 | `fast` (Ornith-1.0-35B-A3B, 21.9 GiB) | 3B | 0.672 | 36.7 | ~22 | 0.60 |
 | `deep` (gpt-oss-120b, MXFP4) | 5.1B | 0.542 | 26.8 | 19.6 | 0.73 |
 | `coder` (Qwen3-Coder-Next 80B-A3B, 46 GiB) | 3B | 0.617 | 40.0 | 18 | 0.45 |
+| Ornith-Agents-A1-3.6 (20.5 GiB, rejected) | 3B | 0.630 | 39.1 | 28.66 | 0.73 |
+| MiniMax-M2.1 IQ1_S (43.8 GiB, rejected) | 10B | 0.205 | 36.0 | 19.37 | 0.54 |
 
 So the realistic band is **0.45 to 0.75 of the ceiling**, and the position
 within that band tracks routing overhead: `coder` has 512 experts and a hybrid
 attention stack and lands at the bottom, `deep` has 128 and lands at the top.
 A high expert count pushes a candidate toward 0.45.
 
-Apply this before getting excited about any number below. A candidate whose
-ceiling is 36 t/s is a 16-27 t/s model in practice, which is `coder` territory,
-not a breakthrough.
+**The method works, and it did not help.** Both tested candidates landed inside
+their predicted bands - Ornith-3.6 was estimated 20-34 base and measured 28.66,
+MiniMax was estimated 16-27 and measured 19.37. Neither was rejected on
+throughput. Both were rejected on things this formula cannot see. Budget the
+testing time accordingly: the estimate tells you whether a candidate is worth
+downloading, never whether it is worth deploying.
+
+### The formula says nothing about depth, and depth is where MiniMax died
+
+`tg_ceiling` describes generation at zero context. It does not model how KV
+reads scale as the context fills, and that scaling varies enormously by
+attention layout:
+
+| model | full-attention layers | tg d0 -> d32768 |
+|---|---|---|
+| `fast` | 41 of 41 | 25.3 -> 20.9 (-17%) |
+| `coder` | 12 of 48 (hybrid GDN) | 18.5 -> 15.7 (-15%) |
+| MiniMax-M2.1 | **62 of 62** | 19.37 -> **6.75 (-65%)** |
+
+Before estimating any candidate for a long-context slot, read `attn_type_list`
+(or the equivalent) out of `config.json` and count the full-attention layers.
+A model that is all full attention over many layers pays KV bandwidth on every
+one of them, and a respectable d0 figure tells you nothing about how it serves
+a 32k agent prefix. Fitting in the pool is a separate and easier question - see
+MiniMax below, which fit comfortably and was still unusable.
 
 ## Priority order
 
 | # | model | replaces | est. real tg | why it is ranked here |
 |---|---|---|---|---|
-| 1 | Ornith-Agents-A1-3.6-35B-A3B | `fast` | 20-34 base, higher with MTP | cheapest test that could move the slot that matters most |
-| 2 | MiniMax-M2.1 | `coder`, maybe `deep` | 16-27 | only candidate that could retire two slots; severe quant risk |
-| 3 | Step-3.5-Flash | `coder` | 11-18 with MTP | best benchmarks, worst fit; likely slower than the incumbent |
+| 3 | Step-3.5-Flash | `coder` | 11-18 with MTP | last untested entry; best benchmarks, worst fit |
 
-This ordering differs from the researcher's, which put MiniMax first and Ornith
-last. The reason is the correction factor above plus test cost: Ornith-3.6 is a
-20.5 GiB download that swaps into an existing alias with no config change, so
-it can be accepted or rejected in one session, while the other two are 47 and
-69 GiB downloads whose realistic throughput lands at or below what they replace.
+Candidates 1 (Ornith-Agents-A1-3.6) and 2 (MiniMax-M2.1) have been measured and
+rejected. Step-3.5-Flash keeps its original ranking and its original caveat:
+it is expected to land at or below the throughput of the slot it would replace,
+and its 69.2 GiB leaves too little room for the 131072 context this lineup runs.
+The KV arithmetic below is now a hard gate on it rather than a suggestion.
 
 ---
 
-## 1. Ornith-Agents-A1-3.6-35B-A3B - replaces `fast`
+## Measured and rejected
 
-DARE-TIES merge on top of Qwen3.6-35B-A3B, the generation after the Qwen3.5
-base that the current Ornith-1.0 is built on.
+### 1. Ornith-Agents-A1-3.6-35B-A3B - rejected 2026-08-01
 
-- Arch `qwen35moe`, mainline, with hybrid-MTP handling already in
-  `src/llama-model.cpp` (~lines 2147-2242). Same arch as the incumbent, so this
-  is a file swap, not a config exercise.
-- Repo `tepirale/Ornith-Agents-A1-3.6-35B-A3B-MTP-GGUF`. `Q4_K_M` 20.5 GiB
-  (`Q6_K` 27.4 GiB also available). Ships `mmproj-F32.gguf` for vision and a
-  real MTP sidecar grafted post-quantization (Q8_0 weights / BF16 router / F32
-  norms).
-- 35B total, 3B active. Ceiling 45 t/s at Q4_K_M density; at `fast`'s measured
-  0.60 ratio that is ~27 t/s base, and MTP speculation has been worth +35-45%
-  here, so mid-30s to low-40s is the plausible landing zone against `fast`'s
-  current 34.6.
-- Speculation: genuine MTP tensor set, not the declared-but-missing kind that
-  killed GLM-4.7-Flash. Start at `spec-draft-n-max = 3`, which is the measured
-  peak for the incumbent.
+DARE-TIES merge on Qwen3.6-35B-A3B, tested as a replacement for `fast`.
+Files kept at `/root/models/ornith36-agents-a1-*`.
 
-**Risk:** no published benchmarks at all. The model card says so outright - no
-SWE-bench, no Terminal-Bench, no tool-calling numbers. DARE-TIES merges
-frequently degrade the instruction-following and tool-call formatting that an
-agentic client depends on, and throughput cannot detect that.
+**It won every throughput comparison.** `llama-bench`, both models measured in
+the same session, Vulkan backend confirmed on every run:
 
-**Why it is still first:** the risk is entirely quality, and quality is exactly
-what `check-vision-tools.sh` and `reason-eval.sh` answer in a single pass on an
-already-configured alias. Cheapest possible disconfirmation of the highest-value
-slot. If it fails, it fails in an hour and costs 20 GiB.
+| metric | incumbent `fast` | Ornith-3.6 | delta |
+|---|---|---|---|
+| pp512 | 333.60 +/- 1.28 | 361.21 +/- 1.47 | +8.3% |
+| tg128 | 25.36 +/- 0.01 | 28.66 +/- 0.02 | +13.0% |
+| pp512 @d32768 | 166.12 +/- 1.84 | 170.80 +/- 1.77 | +2.8% |
+| tg64 @d32768 | 20.85 +/- 0.11 | 23.08 +/- 0.15 | +10.7% |
 
-## 2. MiniMax-M2.1 - replaces `coder`, possibly `deep` as well
+Served with MTP (`probe-server.sh`, 3 samples): 344.2 pp / 36.03 tg at
+acceptance 0.823-0.855, against the incumbent's 309.0 / 34.60 at 0.815-0.826.
 
-- Arch `minimax-m2`, present as `LLM_ARCH_MINIMAX_M2` in `src/llama-arch.cpp`.
-  Confirm `config.json` `model_type` on the 2.1 point release before
-  downloading; point releases usually keep the parent arch string but this is
-  unverified.
-- Repo `bartowski/MiniMaxAI_MiniMax-M2.1-GGUF`, file
-  `MiniMaxAI_MiniMax-M2.1-IQ1_S.gguf`, 47,009,105,696 bytes confirmed via the HF
-  tree API. `IQ1_M` at 49.0 GiB gives a small safety margin.
-- 229B total, 10B active, 0.205 bytes/param (1.64 bits/weight). Ceiling 36 t/s;
-  expert count is unknown, so the realistic band is the full 16-27 t/s.
-- `IQ1_S`/`IQ1_M` have real Vulkan kernels in this tree (`dequant_funcs.glsl`,
-  `mul_mat_vecq.comp`, `mul_mm.comp`). This is not the Ternary-Bonsai situation.
-- SWE-bench Verified 74.0 (self-reported, 4-run average, mixed scaffolds), above
-  `coder`'s 70.6 and below `fast`'s 75.6.
-- Speculation: none confirmed. z-lab publishes DFlash drafters for M2.5 and M2.7
-  but not M2.1. Assume no draft path; the estimate above already does.
+Discount part of that. The incumbent is a Q6_K/Q5_K/IQ4_XS mix at 21.9 GiB and
+the candidate is Q4_K_M at 20.5 GiB, so it reads about 6% fewer bytes per token
+before any architectural merit is counted.
 
-**Risk, and it is the whole question:** 1.64 bits/weight is far more aggressive
-than anything currently deployed, and 229B is small for a model expected to
-survive 1-bit-class quantization gracefully - the models that do this well are
-usually 500B+. The published 74.0 was certainly not measured on this quant. The
-specific failure to expect is not gibberish but subtly broken tool calls and
-malformed diffs, which throughput testing cannot see.
+**It was rejected on reasoning.** `reason-eval.sh`, same 8 problems, same
+session, temperature 0, 8000 max_tokens:
 
-**Payoff if it holds:** it is the only candidate that could plausibly collapse
-`coder` and `deep` into one slot, which is worth more than a throughput win.
+| | score | wall time | reasoning emitted |
+|---|---|---|---|
+| incumbent `fast` | **8/8** | 186 s | 19,592 chars |
+| Ornith-3.6 | **6/8** | 570 s | 70,493 chars |
 
-## 3. Step-3.5-Flash - replaces `coder`
+It failed `deadlock` and `list-mutation` by exhausting the full token budget
+without ever concluding - roughly 30,000 characters of reasoning each, ending
+in `finish_reason: length`. The incumbent answers both in 93 s combined. Tool
+calling and vision both passed, so the merge damage landed on reasoning
+termination rather than output formatting.
+
+Runaway reasoning in an agent loop costs far more than 4% served generation
+buys. The risk flagged at research time - an unbenchmarked DARE-TIES merge
+degrading behaviour that throughput cannot detect - was real, it simply
+manifested as non-termination instead of malformed tool calls.
+
+**Check whether an MTP sidecar is actually a model before wiring it.** The repo
+ships `mtp-sidecar.gguf` alongside the weights, which looks like it needs
+`spec-draft-model`. It does not, and it cannot be used that way: the sidecar
+holds 20 tensors with no `token_embd.weight`, so `llama_model_load_from_file`
+rejects it outright. The **main** GGUF already contains the complete block-40
+MTP layer, byte-identical types - the sidecar is a redundant duplicate. Correct
+wiring was identical to the incumbent: `spec-type = draft-mtp` and no
+draft-model line, which takes the built-in hybrid path (`creating MTP draft
+context against the target model`) and speculates correctly.
+
+This is a third failure shape, distinct from the two in `README.md`: not the
+`probe-server.sh` stall and not DeviceLost-on-load, but a packaging mismatch
+that costs a debugging session if assumed rather than checked. Inspect the
+sidecar's tensor list first. If the main file already carries the nextn block,
+ignore the sidecar entirely.
+
+### 2. MiniMax-M2.1 IQ1_S - rejected 2026-08-01
+
+229B total / 10B active, arch `minimax-m2` (`LLM_ARCH_MINIMAX_M2`, confirmed at
+`src/llama-arch.cpp:129`; the 2.1 point release does report `model_type:
+minimax_m2`). Tested as a replacement for `coder`, and potentially `deep` as
+well. File kept at `/root/models/minimax-m21-iq1s.gguf`.
+
+**It fit, which was the only prediction that held.** Loaded cleanly at
+`ctx-size 131072`: GTT 46.05 GiB + VRAM 15.58 GiB = 61.63 GiB of the 76 GiB
+pool, 14.4 GiB spare, ~31.5 s to load.
+
+**Rejected twice over, on independent grounds.**
+
+First, it is slower than both incumbents before depth is considered, and then
+it collapses:
+
+| | `coder` | `deep` | MiniMax-M2.1 |
+|---|---|---|---|
+| pp served | 235 | 242 | 105.3 |
+| tg served | 25 | 19.6 | 16.73 |
+| pp512 (`llama-bench`) | 228.91 | - | 80.42 +/- 0.45 |
+| tg128 @d0 | 18.58 | - | 19.37 +/- 0.02 |
+| tg128 @d32768 | 15.74 | - | **6.75 +/- 0.00** |
+
+62 of 62 layers are full attention, so there is no equivalent of `coder`'s GDN
+discount and KV bandwidth scales with depth across every layer. A 65% drop by
+32k makes it unusable well inside its own context window, on a slot whose whole
+purpose is long agent prefixes. No speculation is available to offset it -
+z-lab publishes DFlash drafters for M2.5 and M2.7 but not for 2.1.
+
+Second, reasoning does not converge at 1.64 bits/weight. Two of two attempted
+`reason-eval.sh` questions - including the trivial bat-and-ball - consumed the
+entire 8000-token budget without producing an answer, roughly 8.5 minutes of
+GPU each. The run was stopped at 2 of 8 once the pattern reproduced, so this is
+a labelled partial: **0/2 attempted, 6/8 not run**.
+
+**What did not fail is worth recording.** The predicted 1-bit failure mode was
+subtly malformed tool calls and broken diffs. That did not happen. Coherence
+passed, tool calling passed (`get_weather({"city":"Manila"})`), and a realistic
+`edit_file` request produced valid JSON with an exactly-matching `old_str` and a
+correct fix. When this model finishes, its structured output is fine. The
+problem is that it frequently does not finish.
+
+**There is no better quant to retreat to.** IQ1_S is the only one that fits:
+IQ2_S is 59.0 GiB, which plus ~16.5 GiB of q8_0 KV at 131072 exceeds the pool.
+Note also that `IQ1_M` at "49.0 GiB" in the original research was GB, not GiB -
+the real figure is 45.7 GiB, and it does not change the conclusion.
+
+---
+
+## 3. Step-3.5-Flash - replaces `coder` (untested)
 
 - Arch `step35`, confirmed in `src/llama-arch.cpp`. 196B total, 11B active, 288
   routed experts (top-8) plus 1 shared, native MTP-3 head.
@@ -129,12 +202,16 @@ ceiling leaves roughly 6.8 GiB for KV and overhead, which will not support the
 131072 context the current lineup runs - a hard problem for an agent workload
 that lives on long prefixes.
 
-**Before downloading 69 GiB:** compute the q8_0 KV footprint at a realistic
-context and confirm it fits. If it forces context below ~32k, stop there.
+**Before downloading 69 GiB:** count the full-attention layers and compute the
+q8_0 KV footprint at 131072. MiniMax cost ~132 KiB/token at 62 full-attention
+layers; Step-3.5-Flash has more layers still, and only 6.8 GiB to spend. If the
+arithmetic forces context below ~32k, stop there and do not download it. This
+gate is now backed by measurement rather than caution: MiniMax passed the
+easier version of this test (it fit) and still failed in service.
 
 ---
 
-## Rejected, with reasons
+## Rejected at research time, with reasons
 
 | model | reason |
 |---|---|
@@ -168,3 +245,22 @@ This is the more useful answer anyway. With `models-max = 1` a new slot buys no
 concurrency - it costs disk plus a 14-31 s swap - while `coder` and `deep` are
 already arguably redundant against `fast`. The lineup's problem is that it has
 too many slots, not too few.
+
+## What the two rejections say about the shortlist as a whole
+
+Both tested candidates were quality failures that throughput testing would have
+scored as wins, and both failed the same way: they did not stop generating.
+Ornith-3.6 exhausted its budget on 2 of 8 reasoning problems, MiniMax on 2 of 2.
+The incumbents do not do this.
+
+Two consequences for the next candidate:
+
+- **Run `reason-eval.sh` before any throughput tuning.** It costs one pass and
+  it is what rejected both. A `spec-draft-n-max` sweep on a model that cannot
+  terminate is wasted time; the sweep planned for Ornith-3.6 was skipped for
+  exactly this reason.
+- **Treat non-termination as the expected failure of an aggressively quantized
+  or merged model**, ahead of gibberish or malformed tool calls. Neither
+  rejected model produced either of those. Both produced well-formed output
+  that never arrived at an answer, which is invisible to a coherence check and
+  to every timing metric.

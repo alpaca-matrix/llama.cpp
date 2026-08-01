@@ -55,6 +55,8 @@ Do not spend time on these; all measured zero or negative on this hardware.
 | `models-max = 2` to co-resident two models | OOM-killed under load (see below) |
 | Qwen3-Next-80B-A3B-Thinking as `deep` | less accurate and slower than gpt-oss-120b |
 | Ternary-Bonsai-27B (Q2_0_g128) | will not load - needs the vendor fork, kernels are CUDA/Metal only |
+| Ornith-Agents-A1-3.6-35B-A3B as `fast` | faster on every axis (+13% tg) but reason-eval 6/8 vs 8/8 in 3x the time - runs the token budget out without concluding |
+| MiniMax-M2.1 IQ1_S as `coder`/`deep` | fits at 131072, but tg collapses 65% by d32768 (62 of 62 full-attention layers) and reasoning does not converge at 1.64 bits/weight |
 | Disabling MMVQ (upstream PR 25666) | 0 to -5% - bracketed with `GGML_VK_DISABLE_MMVQ` (see below) |
 | Hoisting q8_0 KV dequant in coopmat1 FA (upstream PR 25494) | no headroom - q8_0 KV already matches f16 at depth (see below) |
 
