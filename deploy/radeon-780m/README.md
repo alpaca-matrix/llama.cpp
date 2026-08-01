@@ -56,6 +56,7 @@ Do not spend time on these; all measured zero or negative on this hardware.
 | Qwen3-Next-80B-A3B-Thinking as `deep` | less accurate and slower than gpt-oss-120b |
 | Ternary-Bonsai-27B (Q2_0_g128) | will not load - needs the vendor fork, kernels are CUDA/Metal only |
 | Disabling MMVQ (upstream PR 25666) | 0 to -5% - bracketed with `GGML_VK_DISABLE_MMVQ` (see below) |
+| Hoisting q8_0 KV dequant in coopmat1 FA (upstream PR 25494) | no headroom - q8_0 KV already matches f16 at depth (see below) |
 
 ### Dense models do not work here
 
@@ -288,6 +289,75 @@ maintainer's counter-benchmark on the sibling PR 24966, which measured dense
 k-quant regressions from the same idea. Taken with the flat results on `fast`
 and `assist`, the evidence across the lineup runs from zero to slightly
 negative. Do not apply PR 25666.
+
+### q8_0 KV dequant and upstream PR 25494
+
+Measured 2026-08-01, binary `b303f73` (build 205, `build-vk2`). PR 25494
+("vulkan: dequant q8_0 KV once in coopmat1") dequantizes and transposes q8_0 K/V
+once into an f16 scratch buffer instead of repeating that work per workgroup
+inside the coopmat1 flash-attention shader. Upstream reports pp512 going
+200 -> 282 t/s at d32768 and 99 -> 166 t/s at d65536 on qwen3moe 30B-A3B, and it
+was independently reproduced by a Vulkan maintainer on an RTX 5090.
+
+Every gating condition is met here, checked at runtime rather than from
+`vulkaninfo`: RADV does advertise `VK_NV_cooperative_matrix2`, but the device
+fails seven of the required feature flags, so llama.cpp's own `matrix_cores`
+string reads `KHR_coopmat` in every run. q8_0 KV is the deployed default and
+`-ctk q8_0 -ctv q8_0` is accepted rather than silently substituted. The patch
+was still rejected, and it was rejected without building it.
+
+**The method: bound the win with an f16 control.** After the patch, the FA
+shader reads an f16 scratch buffer exactly as the native f16 path does, plus a
+one-time dequant. So f16 throughput is the patch's ceiling - it can approach
+f16 and never exceed it. Measuring f16 against q8_0 on the unpatched build
+therefore bounds the maximum possible gain without writing any code.
+
+`fast`, `llama-bench`, `-ngl 99 -fa 1 -ub 2048 -p 512 -n 64 -r 3`, backend
+column confirmed `Vulkan`, two separate invocations so K and V always match
+(comma-separated lists to `-ctk`/`-ctv` can generate cross combinations):
+
+| condition | pp512 | tg64 |
+|---|---|---|
+| q8_0 @ d32768 | 166.92 +/- 1.81 | 20.87 +/- 0.10 |
+| f16 @ d32768 | 168.47 +/- 1.76 | 20.60 +/- 0.07 |
+| q8_0 @ d65536 | 110.99 +/- 0.10 | 17.89 +/- 0.06 |
+| f16 @ d65536 | 112.18 +/- 4.55 | 17.44 +/- 0.01 |
+
+The d32768 pair replicates an earlier session's 167.49 / 167.01 to within
+stddev, so the control is reproducible across sessions, not a one-off.
+
+**pp is the metric that decides this**, because the patch is gated to
+`neq1 >= 64` and never engages during single-token decode. At d65536, where the
+PR claims its largest win, f16 leads by a nominal 1.1% with a stddev of 4.55
+that swamps the gap. q8_0 is already at its own ceiling at both depths. There is
+nothing for the patch to recover. Do not apply PR 25494.
+
+The tg column is not evidence about this patch and must not be read as such, but
+it explains why the upstream result inverts here: q8_0 beats f16 by 2.6% at
+d65536, outside noise on both stddevs. q8_0 KV reads half the bytes, and at
+74 GB/s that saving outweighs the dequant cost. The reference machine has
+bandwidth to spare and is dequant-compute bound, which is the opposite balance.
+
+**Keep the f16-control method.** It settled a patch in one bench run instead of
+a port, a build and an A/B. It generalizes: any change whose mechanism is
+"convert quantized KV into f16 and then proceed normally" is ceilinged by the
+f16 path, so measure that ceiling first. Combined with the `GGML_VK_DISABLE_MMVQ`
+bracket used on PR 25666, two upstream candidates have now been settled without
+porting either.
+
+Full depth sweep from the same build, for reference when judging future FA work:
+
+| model | KV | d0 | d8192 | d32768 | d65536 |
+|---|---|---|---|---|---|
+| `fast` pp512 | q8_0 | 343.80 | 265.99 | 167.49 | 111.30 |
+| `fast` tg64 | q8_0 | 25.31 | 24.12 | 20.93 | 17.86 |
+| `coder` pp512 | q8_0 | 228.91 | 190.54 | 126.27 | 87.11 |
+| `coder` tg64 | q8_0 | 18.58 | 17.67 | 15.74 | 13.68 |
+
+Note `coder` peaked at 32.94 GiB GTT even at d65536. qwen3next runs full
+attention on only 12 of 48 layers, the rest being GDN with context-independent
+recurrent state, so its q8_0 KV at that depth costs roughly 800 MiB rather than
+several GiB. Do not generalize that headroom to conventional-attention models.
 
 ### Greedy decode is not reproducible on `coder`
 
