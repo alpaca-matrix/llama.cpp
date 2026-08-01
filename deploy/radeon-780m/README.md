@@ -55,6 +55,7 @@ Do not spend time on these; all measured zero or negative on this hardware.
 | `models-max = 2` to co-resident two models | OOM-killed under load (see below) |
 | Qwen3-Next-80B-A3B-Thinking as `deep` | less accurate and slower than gpt-oss-120b |
 | Ternary-Bonsai-27B (Q2_0_g128) | will not load - needs the vendor fork, kernels are CUDA/Metal only |
+| Disabling MMVQ (upstream PR 25666) | 0% - bracketed with `GGML_VK_DISABLE_MMVQ`, nothing moved (see below) |
 
 ### Dense models do not work here
 
@@ -221,6 +222,74 @@ Consequences for anything that measures this box:
   says nothing about what happened while it ran. Reading them after the fact is
   what produced a wrong "CPU fallback" call during this investigation; reading
   them mid-stall is what showed the GPU was pegged instead.
+
+### MMVQ and upstream PR 25666
+
+Measured 2026-08-01. PR 25666 ("vulkan: do not enable MMVQ for speculative-decode
+steps on AMD") narrows `ggml_vk_should_use_mmvq`: it raises the `n > 1`
+early-return to `n > 8` so speculative-verify batches fall through to the
+per-vendor heuristics, and on AMD it requires `k >= 4096` rather than 2048 for
+k-quants. Reported at +12.9% tg and +11pp acceptance on gfx1151 Strix Halo, the
+closest RDNA3/UMA analog to this box. It applies cleanly to this tree.
+
+It was bracketed rather than built, using `GGML_VK_DISABLE_MMVQ=1`, which forces
+`should_use_mmvq` false for all n and k - a strict superset of what the PR does.
+Nothing moved:
+
+| model | A1 baseline | B: MMVQ off | A2 repeat |
+|---|---|---|---|
+| `fast` pp512 / tg128 | 333.17 +/- 2.66 / 25.35 | 331.69 +/- 2.61 / 25.37 | 333.30 +/- 2.15 / 25.35 |
+| `assist` pp512 / tg128 | 424.36 +/- 2.88 / 36.03 | 424.80 +/- 2.90 / 35.92 | 424.51 +/- 3.62 / 36.02 |
+
+`llama-bench`, backend column confirmed `Vulkan`. A1 and A2 agree to under 0.1%,
+so the comparison is trustworthy and B sits inside stddev on both models. On the
+server, `assist` (no speculation) was flat across A/B/A, and `fast`'s tg and
+draft acceptance were unchanged - acceptance matched to five decimals between the
+two A rounds.
+
+A cancelling-effects reading was checked and ruled out: if disabling MMVQ helped
+small batches but hurt large-n prefill, the two could mask each other. Prefill
+was flat in every condition, so that is not happening. Since the superset
+measures zero, the PR's narrower version cannot do better.
+
+Two things worth keeping from this:
+
+- **`fast` is not a Q4_K model.** Its expert tensors are a per-layer mix of Q6_K
+  (230 tensors), Q5_K (30) and IQ4_XS (60), and `ggml_vk_should_use_mmvq` already
+  excludes Q6_K from MMVQ on AMD unconditionally ("only a win on Intel"). Most of
+  `fast`'s weight was never MMVQ-eligible, so it is a diluted test of anything
+  MMVQ-related. `assist` is genuinely Q4_K-dominant and is the cleaner probe.
+- **The one case still untested** is Q4_K experts at `k` in [2048, 4096) *under
+  speculative verify*, which is `coder` - excluded because it stalls under
+  benchmark traffic. Reachable with `cache_prompt: true`, which runs clean.
+
+### Prompt processing through the server is not a stable measurement
+
+Measured 2026-08-01, and it invalidates a whole class of comparison.
+
+On `fast`, server-measured pp swung 264.7 -> 253.8 -> 310.9 t/s across an A/B/A
+in which A and B differed only by an environment variable that measured zero
+everywhere else. That is a 17% spread between two identical conditions. In the
+same session `llama-bench` on the same model measured 333.17 then 333.30 t/s,
++/- 2.6.
+
+Stable under `llama-bench` and unstable through the server means the variance
+lives in llama-server's prefill path - slot selection, LCP cache reuse, ubatch
+scheduling - and not in the GPU, the driver, or memory bandwidth. An earlier
+`coder` reading of 182-188 t/s against a 220-235 baseline has the same signature
+and is most likely the same effect rather than hardware degradation.
+
+Consequences:
+
+- **Use `llama-bench` for any pp comparison.** It reports stddev and it is
+  reproducible. `probe-server.sh` pp is not.
+- **`probe-server.sh` remains correct for tg and draft acceptance**, which were
+  stable and reproducible across every round here.
+- Measure A/B/A, never A/B. A single A/B here would have reported a 4% pp
+  regression from B that the second A shows was drift.
+- A single low sample is not a regression. One `fast` sample dropped to
+  acceptance 0.644 and tg 28.97 in one round and did not reproduce in either A
+  round or in the other two B samples. Repeat before believing it.
 
 ### On ROCm
 
