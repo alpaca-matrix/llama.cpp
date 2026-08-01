@@ -169,6 +169,59 @@ and make sure nothing else is driving the server while sampling.
 | `spec-type ngram-*` (all variants) | 0 to -4% with varied prompts |
 | ROCm/HIP backend | wins pp by 7-11%, loses tg by 11-21%, caps at 39 GiB |
 
+### The probe-server stall on `coder`
+
+Measured 2026-08-01. `probe-server.sh` reliably stalls `coder` on the third or
+fourth consecutive sample. Three runs, three stalls:
+
+| run | clean samples | pp / tg | stalled at | recovery |
+|---|---|---|---|---|
+| first | 5 | 227.7 / 24.77 | sample 6 | self-cleared after ~11 min |
+| after clean restart | 3 | 232.0 / 24.77 | sample 4 | none, stopped it after 27 min |
+| after clean restart | 3 | 190.5 / 24.5 | sample 4 | none, stopped it after 8 min |
+
+During a stall the GPU is pegged at 92% at the full 2600 MHz state, the model
+child sits in `R` state burning about a third of a core, its worker threads are
+parked in `futex_do_wait`, and nothing is in `D`. Generation is unaffected
+throughout - tg measures 24.3-25.4 on every clean sample - so what degrades is
+prefill (232 -> 190 t/s across episodes) and then the decode phase hangs
+outright, emitting no timing lines at all.
+
+What it is not, each ruled out by measurement rather than assumed:
+
+| checked | result |
+|---|---|
+| silent CPU fallback | no - the GPU is saturated, not idle |
+| thermal or power throttling | no - 71 C and 44 W, limit is ~95 C |
+| memory pressure | no - PSI ~0, 44 GB free, no swap |
+| driver wedge | no - `renderD128` opens, a clean stop drains GTT to 0.013 GiB |
+| competing load | no - no apt, no unattended-upgrades, nothing else running |
+
+Suspected trigger is the probe's own request shape: the same 2472-token prompt
+repeated with `cache_prompt: false` and `ignore_eos: true` against `parallel = 2`
+plus `kv-unified` plus speculation. The journal shows `f_sim_best = 1.000` on
+every request - a perfect prefix match that is then forced to reprefill cold. A
+real agent client caches, so ordinary serving is probably unaffected, but that
+is unconfirmed and the isolation has not been run yet.
+
+Consequences for anything that measures this box:
+
+- Keep `probe-server.sh` at **3 samples**. The 600 s per-request timeout means
+  one stalled sample costs ten minutes and takes the whole run down with a
+  `TimeoutError` traceback.
+- Prefer `llama-bench` when speculation is not the subject. It does not exhibit
+  this and it reports stddev.
+- Do not kill the service to hurry a stall along. Wait for `gpu_busy_percent` to
+  fall, then stop. A stop during a stall took the full `TimeoutStopSec` of 120 s
+  and needed the SIGKILL escalation, against 1 s when idle. It recovered cleanly
+  both times, but that is the unit hardening working, not luck.
+- A stop/start restores prefill: 190 -> 219.7 t/s on the next sample.
+- **Sample GPU state during the run, not after.** `gpu_busy_percent` and
+  `pp_dpm_sclk` read once a task has released show an idle GPU at 800 MHz, which
+  says nothing about what happened while it ran. Reading them after the fact is
+  what produced a wrong "CPU fallback" call during this investigation; reading
+  them mid-stall is what showed the GPU was pegged instead.
+
 ### On ROCm
 
 ROCm 7.2 works via `HSA_OVERRIDE_GFX_VERSION=11.0.2` (rocBLAS ships no gfx1103
