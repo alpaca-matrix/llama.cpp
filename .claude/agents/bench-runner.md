@@ -106,6 +106,13 @@ How to work around it:
 If you observe this stall on an alias other than `coder`, that is a new and
 reportable finding - say so explicitly.
 
+There is a second, rarer failure with a different signature: `radv/amdgpu: Not
+enough memory for command submission` then `vk::DeviceLostError` during a draft
+model's load-time decode, leaving a zombie child. Distinguish it by the GPU
+being **idle at 0%** rather than pegged at 92%. It followed four restarts inside
+ten minutes, so space restarts out when a task needs several. Recovery is the
+normal stop sequence plus `systemctl reset-failed` before starting again.
+
 ## Reading a number correctly
 
 **Verify the backend before trusting any measurement.** When Vulkan fails to
@@ -215,10 +222,17 @@ four axes - a change that buys 10% tg and loses tool calling is a regression:
 4. **Reasoning** - `reason-eval.sh` on `fast` and `deep`. Note it saturates at
    8/8 for both, so it detects breakage, not improvement.
 
-For a backend or shader change, add a determinism check: greedy decode at
-`temperature: 0, top_k: 1`, same prompt, compare token-for-token against the
-baseline build. Silent numerical divergence is the failure mode that throughput
-testing cannot see.
+For a backend or shader change, a determinism check is worth running - greedy
+decode at `temperature: 0, top_k: 1`, same prompt, compared token-for-token
+against the baseline build - because silent numerical divergence is the failure
+mode throughput testing cannot see. **But it is only valid on some aliases.**
+`coder` is not reproducible at greedy settings even against itself: reduction
+order in batched, parallel-slot Vulkan execution flips an occasional argmax and
+the trajectory diverges from there. `fast` under MTP was reproducible to five
+decimals in the same session. Establish that an alias is self-reproducible - run
+the identical config twice and confirm it matches - before treating any
+token-level difference as evidence of anything. See "Greedy decode is not
+reproducible on `coder`" in the README.
 
 Re-verify after **any** llama.cpp or Mesa change. The optimal `ubatch` moved the
 last time Mesa was upgraded (2048 is current), and the speculation settings are

@@ -55,7 +55,7 @@ Do not spend time on these; all measured zero or negative on this hardware.
 | `models-max = 2` to co-resident two models | OOM-killed under load (see below) |
 | Qwen3-Next-80B-A3B-Thinking as `deep` | less accurate and slower than gpt-oss-120b |
 | Ternary-Bonsai-27B (Q2_0_g128) | will not load - needs the vendor fork, kernels are CUDA/Metal only |
-| Disabling MMVQ (upstream PR 25666) | 0% - bracketed with `GGML_VK_DISABLE_MMVQ`, nothing moved (see below) |
+| Disabling MMVQ (upstream PR 25666) | 0 to -5% - bracketed with `GGML_VK_DISABLE_MMVQ` (see below) |
 
 ### Dense models do not work here
 
@@ -259,9 +259,83 @@ Two things worth keeping from this:
   excludes Q6_K from MMVQ on AMD unconditionally ("only a win on Intel"). Most of
   `fast`'s weight was never MMVQ-eligible, so it is a diluted test of anything
   MMVQ-related. `assist` is genuinely Q4_K-dominant and is the cleaner probe.
-- **The one case still untested** is Q4_K experts at `k` in [2048, 4096) *under
-  speculative verify*, which is `coder` - excluded because it stalls under
-  benchmark traffic. Reachable with `cache_prompt: true`, which runs clean.
+`coder` was tested separately, because unlike the other two it is genuinely in
+the band the patch targets. Its GGUF is 57.2% Q4_K by weight (28.39 GB, the
+`ffn_gate_exps` and `ffn_up_exps` tensors) and **every one of those tensors has
+k = 2048**, exactly inside the [2048, 4096) window the AMD threshold change
+covers. The remaining 35% is Q5_K `ffn_down_exps` at k = 512, already ineligible
+either way. So for `coder` the patch would flip MMVQ off across most of the
+generation phase, not just the speculative-verify window. The codepath is live
+on this box: RADV reports `integerDotProduct4x8BitPackedSignedAccelerated`, and
+the deployed `libggml-vulkan.so` contains the q8_1 MMVQ pipelines.
+
+Measuring it was mostly defeated by the non-determinism recorded below - two of
+three prompts diverged as much between two baseline rounds as between baseline
+and treatment. One prompt was fully stable (identical 19-token output and 14/20
+acceptance in every run), and there the comparison is clean:
+
+| condition | tg |
+|---|---|
+| A1 baseline | 20.51 |
+| B, MMVQ off | **19.57** |
+| A2 baseline | 20.70 |
+| A2 repeat | 20.79 |
+| baseline x5 | 20.74 - 20.82 |
+
+B sits below every baseline observation, about 5% down. That is a single B
+sample and not conclusive on its own, but it points the same way as the
+maintainer's counter-benchmark on the sibling PR 24966, which measured dense
+k-quant regressions from the same idea. Taken with the flat results on `fast`
+and `assist`, the evidence across the lineup runs from zero to slightly
+negative. Do not apply PR 25666.
+
+### Greedy decode is not reproducible on `coder`
+
+Measured 2026-08-01, and it invalidates a test that would otherwise look sound.
+
+At `temperature: 0, top_k: 1` with an identical cached prompt, `coder` does not
+generate the same tokens run to run. Two baseline rounds of the same config
+diverged in completion length and draft acceptance by as much as a baseline-vs-
+treatment comparison did, and the divergence reproduced within a single server
+process with no restart in between. The cause is floating-point reduction order
+in batched, parallel-slot Vulkan execution: an occasional argmax flips, and the
+whole trailing trajectory follows it somewhere else, changing EOS timing and the
+acceptance denominator with it.
+
+This is alias-specific. `fast` under MTP was reproducible in the same session -
+its acceptance matched to five decimals between rounds - so do not assume either
+behaviour without checking the alias you are actually measuring.
+
+Consequences:
+
+- **A token-for-token determinism check is not a valid non-regression test on
+  `coder`.** It will report differences that have nothing to do with the change
+  under test. It remains valid on `fast`.
+- Long generations make it worse, because a trajectory needs room to diverge.
+  Keep `n_predict` short when comparing acceptance, or pin the token count with
+  `ignore_eos` so at least the denominator is fixed.
+- Prefer prompts whose output is short and stable for any A/B. Finding one is
+  worth the effort; the stable short prompt above was the only usable comparison
+  out of three.
+
+### A second failure mode: DeviceLost on spec-model load
+
+Seen once, 2026-08-01, and distinct from the `probe-server.sh` stall above.
+
+During the DFlash draft model's load-time sanity decode, the server logged
+`radv/amdgpu: Not enough memory for command submission` followed by
+`vk::DeviceLostError`, and left the router waiting on a zombie child. The tell
+that separates it from the stall: **the GPU was idle at 0%, not pegged at 92%**,
+with no `D`-state process and clean memory (GTT 0.013 GiB, VRAM 0.068 GiB). So
+it is an allocation failure at submission time, not a runaway kernel.
+
+It followed four service restarts inside about ten minutes, so rapid restart
+cycling stressing the RADV allocator is the suspected trigger, unconfirmed.
+Recovery was the documented sequence and it worked: idle check, `systemctl stop`
+(which again took the full `TimeoutStopSec` and needed the SIGKILL escalation,
+logging `Result: timeout`), GTT and VRAM drained fully, `systemctl reset-failed`,
+then a restart that succeeded first try. If you are restarting repeatedly while
+testing, space the restarts out.
 
 ### Prompt processing through the server is not a stable measurement
 
