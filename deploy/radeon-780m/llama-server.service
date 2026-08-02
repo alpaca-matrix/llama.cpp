@@ -12,6 +12,10 @@ ExecStart=/root/llama.cpp/build-vk2/bin/llama-server \
   --metrics
 Restart=on-failure
 RestartSec=5
+# smaller command batches let the GPU start work while the CPU is still
+# recording the rest of the graph; measured +0.9% tg over the default 100
+# (llama-bench sweep 12/25/50/100/1M, fast, 2026-08-02)
+Environment=GGML_VK_MAX_NODES_PER_SUBMIT=25
 LimitMEMLOCK=infinity
 LimitNOFILE=65536
 
