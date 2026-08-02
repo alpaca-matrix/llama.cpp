@@ -13,19 +13,19 @@
       "models": {
         "fast": {
           "name": "fast - Ornith-1.0-35B MTP-APEX",
-          "limit": { "context": 131072 }
+          "limit": { "context": 131072, "output": 32768 }
         },
         "coder": {
           "name": "coder - Qwen3-Coder-Next + DFlash",
-          "limit": { "context": 131072 }
+          "limit": { "context": 131072, "output": 32768 }
         },
         "assist": {
           "name": "assist - Qwen3-VL-30B-A3B",
-          "limit": { "context": 131072 }
+          "limit": { "context": 131072, "output": 32768 }
         },
         "deep": {
           "name": "deep - gpt-oss-120b",
-          "limit": { "context": 131072 }
+          "limit": { "context": 131072, "output": 32768 }
         }
       }
     }
