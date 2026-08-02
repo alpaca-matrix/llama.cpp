@@ -92,6 +92,86 @@ def test_anthropic_messages_with_system():
     assert len(res.body["content"]) > 0
 
 
+def test_anthropic_messages_trailing_system_message():
+    """A system turn inside messages is folded into the leading system block.
+
+    Claude Code appends one listing its agent types. Qwen3.5 raises on a system
+    message that is not first, so before folding this request returned a 400.
+    """
+    global server
+    server.jinja = True
+    server.chat_template_file = '../../../models/templates/Qwen3.5-4B.jinja'
+    server.start()
+
+    res = server.make_request("POST", "/v1/messages", data={
+        "model": "test",
+        "max_tokens": 50,
+        "system": "You are a helpful assistant.",
+        "messages": [
+            {"role": "user", "content": "Hello"},
+            {"role": "system", "content": [{"type": "text", "text": "Available agent types: none."}]}
+        ]
+    })
+
+    assert res.status_code == 200, f"Expected 200, got {res.status_code}: {res.body}"
+    assert res.body["type"] == "message"
+
+
+def test_anthropic_count_tokens_trailing_system_message():
+    """The folded system turn is kept, not dropped, so it costs tokens"""
+    server.start()
+
+    def count(messages):
+        res = server.make_request("POST", "/v1/messages/count_tokens", data={
+            "model": "test",
+            "system": "You are a helpful assistant.",
+            "messages": messages,
+        })
+        assert res.status_code == 200, f"Expected 200, got {res.status_code}: {res.body}"
+        return res.body["input_tokens"]
+
+    without = count([{"role": "user", "content": "Hello"}])
+    with_system = count([
+        {"role": "user", "content": "Hello"},
+        {"role": "system", "content": "Available agent types: none."}
+    ])
+
+    assert with_system > without, f"Trailing system message was dropped: {with_system} vs {without}"
+
+
+def test_anthropic_output_config_effort():
+    """output_config.effort reaches the template as reasoning_effort.
+
+    gpt-oss renders "Reasoning: <effort>" into its system block, so a multi-token
+    effort value is visible as extra input tokens.
+    """
+    global server
+    server.jinja = True
+    server.chat_template_file = '../../../models/templates/openai-gpt-oss-120b.jinja'
+    server.start()
+
+    def count(extra):
+        res = server.make_request("POST", "/v1/messages/count_tokens", data={
+            "model": "test",
+            "messages": [{"role": "user", "content": "Hello"}],
+            **extra,
+        })
+        assert res.status_code == 200, f"Expected 200, got {res.status_code}: {res.body}"
+        return res.body["input_tokens"]
+
+    sentinel = "exhaustive step by step deliberation"
+    default = count({})
+    with_effort = count({"output_config": {"effort": sentinel}})
+    assert with_effort > default, f"effort did not reach the template: {with_effort} vs {default}"
+
+    # an explicit chat_template_kwargs from the caller takes precedence
+    overridden = count({
+        "output_config": {"effort": sentinel},
+        "chat_template_kwargs": {"reasoning_effort": "medium"},
+    })
+    assert overridden == default, f"chat_template_kwargs was overwritten: {overridden} vs {default}"
+
+
 def test_anthropic_messages_multipart_content():
     """Test messages with multipart content blocks"""
     server.start()

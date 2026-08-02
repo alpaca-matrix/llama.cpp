@@ -334,11 +334,14 @@ static void normalize_anthropic_billing_header(std::string & system_text) {
 json server_chat_convert_anthropic_to_oai(const json & body) {
     json oai_body;
 
-    // Convert system prompt
+    // Convert system prompt. Collected here but only prepended once the messages have
+    // been walked, because a message may carry a system turn of its own (see below).
     json oai_messages = json::array();
+    std::string system_content;
+    bool has_system = false;
     auto system_param = json_value(body, "system", json());
     if (!system_param.is_null()) {
-        std::string system_content;
+        has_system = true;
 
         if (system_param.is_string()) {
             system_content = system_param.get<std::string>();
@@ -352,11 +355,6 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
                 }
             }
         }
-
-        oai_messages.push_back({
-            {"role", "system"},
-            {"content", system_content}
-        });
     }
 
     // Convert messages
@@ -367,6 +365,32 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
     if (messages.is_array()) {
         for (const auto & msg : messages) {
             std::string role = json_value(msg, "role", std::string());
+
+            // 'system' is not a role the Anthropic API defines for messages, but clients do
+            // send one (Claude Code appends a trailing system turn listing its agent types).
+            // Most chat templates only accept a system message in first position - some raise
+            // on a later one, others drop it silently - so fold it into the leading block.
+            if (role == "system") {
+                has_system = true;
+                std::string text;
+                auto content = json_value(msg, "content", json());
+                if (content.is_string()) {
+                    text = content.get<std::string>();
+                } else if (content.is_array()) {
+                    for (const auto & block : content) {
+                        if (json_value(block, "type", std::string()) == "text") {
+                            text += json_value(block, "text", std::string());
+                        }
+                    }
+                }
+                if (!text.empty()) {
+                    if (!system_content.empty()) {
+                        system_content += "\n\n";
+                    }
+                    system_content += text;
+                }
+                continue;
+            }
 
             if (!msg.contains("content")) {
                 if (role == "assistant") {
@@ -529,6 +553,13 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
         }
     }
 
+    if (has_system) {
+        oai_messages.insert(oai_messages.begin(), json {
+            {"role", "system"},
+            {"content", system_content}
+        });
+    }
+
     oai_body["messages"] = oai_messages;
 
     // Convert tools
@@ -589,6 +620,24 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
         if (thinking_type == "enabled") {
             int budget_tokens = json_value(thinking, "budget_tokens", 10000);
             oai_body["thinking_budget_tokens"] = budget_tokens;
+        }
+    }
+
+    // Anthropic carries the reasoning effort in 'output_config'. The OAI 'reasoning_effort'
+    // field only acts on "none", so hand the value to the template as a kwarg instead - that
+    // is what gpt-oss and other templates with an effort knob read. An explicit
+    // chat_template_kwargs from the caller wins.
+    if (body.contains("output_config")) {
+        json output_config = json_value(body, "output_config", json::object());
+        std::string effort = json_value(output_config, "effort", std::string());
+        if (!effort.empty()) {
+            if (!oai_body.contains("chat_template_kwargs") || !oai_body.at("chat_template_kwargs").is_object()) {
+                oai_body["chat_template_kwargs"] = json::object();
+            }
+            json & kwargs = oai_body.at("chat_template_kwargs");
+            if (!kwargs.contains("reasoning_effort")) {
+                kwargs["reasoning_effort"] = effort;
+            }
         }
     }
 
