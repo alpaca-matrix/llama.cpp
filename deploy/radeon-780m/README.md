@@ -693,13 +693,63 @@ Measured on this hardware, generation with a 2.4k-token prompt:
 | `coder` | 235 t/s | 25 t/s | no | yes | no |
 | `deep` | 242 t/s | 19.6 t/s | no | yes | yes, 8/8 in 279 s |
 
-`fast` is now the default choice for almost everything: it beats `coder` on
-every published SWE-bench variant while generating 38% faster in half the
-footprint, and matches `deep` on the reasoning eval in two thirds the time from
-a third of the size. `assist` is kept only for its prefill lead, which matters
-on the very large contexts an agent client builds up. Note the eval saturates -
-both `fast` and `deep` score 8/8 - so it cannot separate them on genuinely hard
-analysis, where `deep`'s 117B parameters may still tell.
+`fast` is the default choice for almost everything: it beats `coder` on every
+published SWE-bench variant while generating 38% faster in half the footprint,
+and it ties `deep` 8/8 on `reason-eval.sh`. `assist` is kept only for its
+prefill lead, which matters on the very large contexts an agent client builds
+up.
+
+That 8/8 tie is an artifact of the eval, not a real equivalence - see the next
+section, which was written to break it and does.
+
+### The hard tier separates `fast` from `deep` (2026-08-02)
+
+`reason-eval.sh` saturates: `fast` and `deep` both score 8/8, so it cannot
+justify keeping a 117B model that costs 60 GiB and a 31 s swap, and it cannot
+score a candidate claiming to beat it. `reason-eval-hard.sh` is ten problems
+picked so a strong 35B is expected to miss several - derivations the common
+pattern gets wrong (a recurrence outside the master theorem, the x86-TSO
+store-buffer litmus test, the Lamport-clock converse) plus named subtleties at
+the obscure end. Same harness, temperature 0, `max_tokens` 8000, all three
+passes back to back on an idle box:
+
+| | `fast` | `deep` (default effort) | `deep` (effort=high) |
+|---|---|---|---|
+| score | 8/10, **2 truncated** | **10/10, 0 truncated** | **10/10, 0 truncated** |
+| wall time, all 10 | 999 s | **208 s** | 307 s |
+| reasoning emitted | 95,650 ch | **8,558 ch** | 22,234 ch |
+| generation | 33 t/s | ~19.6 t/s | ~19.6 t/s |
+
+**`deep` is five times faster to a complete set of answers while generating at
+60% of the token rate**, because it emits 11x less reasoning. Token economy
+dominates raw throughput on this slot by a margin large enough that no
+bandwidth-side tuning could close it.
+
+Both of `fast`'s losses are truncation, not a wrong answer, and one of them is
+damning on its own: it spent 29,786 chars failing to name reservoir sampling,
+which `deep` answers in 4.7 s and 240 chars. That is a runaway, not a hard
+question. RETRY-PENDING
+
+**`reasoning_effort: high` buys nothing here**: identical 10/10 for 2.6x the
+reasoning and 48% more wall time. Leave `deep` at the template default for
+problems of this shape. Whether high effort earns its cost on open-ended design
+work is untested.
+
+Two consequences worth carrying forward:
+
+- **`deep` is not redundant against `fast`.** The lineup note that `coder` and
+  `deep` are arguably redundant holds only against the saturated eval. On
+  problems that discriminate, `deep` is both more accurate and faster to an
+  answer.
+- **`fast` shows the same failure mode that rejected Ornith-3.6 and
+  MiniMax-M2.1** - exhausting the budget without concluding - just on harder
+  problems than tier 1 contains. Apply that rejection criterion to candidates
+  knowing the incumbent is not immune to it.
+
+The tier saturates `deep` at 10/10, so it justifies the slot but cannot rank
+two `deep`-class candidates against each other. A shortlist for this slot needs
+harder items again. The bar for any replacement: 10/10, under ~210 s, under
+~10k chars of reasoning.
 
 `models-max = 1` swaps on demand rather than co-residing: gpt-oss alone is 59 GiB
 of the 76 GiB pool. Swap cost is ~31 s for gpt-oss, ~14 s for the 35B.
