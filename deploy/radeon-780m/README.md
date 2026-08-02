@@ -35,6 +35,8 @@ Ranked by measured effect:
 | KV cache `q8_0` | +5-7% generation, half the KV memory |
 | `ttm.pages_limit` raise | unlocks models >39 GiB |
 | `parallel = 2` + `kv-unified` + `cache-ram` | keeps agent prefix cached across interleaved requests |
+| `spec-draft-p-min = 0.3` on `fast` | +2% generation; acceptance 0.82 -> 0.85-0.87 (see fast-opt-plan notes below) |
+| `spec-draft-type-k/v = q8_0` on `fast` | 0% speed, halves the MTP draft KV; kept for the memory |
 
 Note the second and third interact: the optimal ubatch changed when Mesa was
 upgraded. Retune ubatch after any driver change.
@@ -59,6 +61,23 @@ Do not spend time on these; all measured zero or negative on this hardware.
 | MiniMax-M2.1 IQ1_S as `coder`/`deep` | fits at 131072, but tg collapses 65% by d32768 (62 of 62 full-attention layers) and reasoning does not converge at 1.64 bits/weight |
 | Disabling MMVQ (upstream PR 25666) | 0 to -5% - bracketed with `GGML_VK_DISABLE_MMVQ` (see below) |
 | Hoisting q8_0 KV dequant in coopmat1 FA (upstream PR 25494) | no headroom - q8_0 KV already matches f16 at depth (see below) |
+| `spec-draft-p-min` 0.5 (and 0.2) | 0.5 over-truncates (accept 0.86-0.89 but mean len drops, tg back to baseline); 0.2 barely fires; 0.3 is the peak |
+| `GGML_VK_MAX_NODES_PER_SUBMIT = 25` | llama-bench tg +0.9%, but SERVED tg -1% - bench gains on submit granularity do not transfer to the MTP round shape |
+| `cache-idle-slots = false` | deferred, not rejected: single-stream served pp measured stable (325-327 t/s) on 2026-08-02, so the 264-311 variance it targets was not reproducible; revisit if agent-shaped pp instability recurs |
+
+### Stage 0 of fast-opt-plan: where decode time goes (2026-08-02)
+
+Measured with `GGML_VK_PERF_LOGGER_CONCURRENT` on `fast`, build b303f73:
+
+- Decode (tg64): GPU-busy median 34.9 ms/token vs ~39.4 ms unlogged wall ->
+  the CPU/sync bubble is ~11% of decode wall. The box is GPU-bound; per-kernel
+  wins are worth pursuing, and overlap work caps out around that 11%.
+- Prefill (pp512): GPU-busy ~= wall (~1% bubble). Prefill is pure GPU.
+- Fusion sanity: `TOPK_MOE_EARLY_SOFTMAX_NORM`, `RMS_NORM_MUL`, `MULTI_ADD`
+  all present in the served graph. `GATED_DELTA_NET` confirms the hybrid arch.
+- `graphs reused` counter: ~72 per 256-token request ~= one per speculative
+  round, i.e. only the target verify graph reuses; the MTP draft context
+  rebuilds its graph on all 4 of its decodes per round (shape alternation).
 
 ### Dense models do not work here
 
