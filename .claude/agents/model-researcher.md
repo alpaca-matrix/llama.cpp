@@ -161,10 +161,12 @@ So, for any candidate:
   Qwen3-Next-Thinking emits 27.2k for a worse answer, and Ornith-3.6 emitted
   70k against the incumbent's 19.6k. Report any published evidence on reasoning
   length or thinking-token cost, and say when there is none.
-- Flag that `reason-eval.sh` must run before any throughput tuning on the box.
-  That is the main session's job, not yours, but it is what rejected both
-  tested candidates, and a tuning sweep on a model that cannot terminate is
-  wasted time.
+- Flag that `reason-eval.sh` and `reason-eval-hard.sh` must run before any
+  throughput tuning on the box. That is the main session's job, not yours, but
+  it is what rejected both tested candidates, and a tuning sweep on a model
+  that cannot terminate is wasted time. Note when recommending a rejection that
+  the incumbents are not immune either: `fast` truncates on 2 of the 10 hard
+  items. The bar is the incumbent for that slot, not perfection.
 
 ## The `deep` slot specifically
 
@@ -175,22 +177,34 @@ damage, 128 experts, terse reasoning, effort knob - and the 2026-08-01 sweep of
 the >100B space found nothing that beat it: everything either exceeded the
 pool, scored lower, or needed a vendor fork.
 
-Two things follow.
+**The slot earns its keep, measured.** On `reason-eval-hard.sh` (2026-08-02),
+`deep` scored 10/10 in 208 s emitting 8,558 chars of reasoning, against `fast`
+at 8/10 in 999 s emitting 95,650. `deep` reached a complete set of answers five
+times faster while generating at 60% of `fast`'s token rate. Do not repeat the
+older claim that `deep` is redundant against `fast` - it held only against the
+saturated tier-1 eval.
 
-- **The clear gap is speed, not intelligence.** `deep` is the only slot with no
-  speculation at all, while `fast` gets ~1.6x from its MTP head and `coder`
-  ~1.4x from DFlash. A model of comparable quality that ships a *verified* MTP
-  head would land near 26-30 t/s in the same byte budget. Rank that above a
-  marginal benchmark gain.
-- **The intelligence bar is unproven and hard to prove.** `reason-eval`
-  saturates - `fast` and `deep` both score 8/8 - so the current instrument
-  cannot separate a 35B from a 117B, and therefore cannot score a candidate
-  that is genuinely smarter than the incumbent. A `deep` replacement is only
-  worth ~60 GiB and a 31 s swap if it wins on problems `fast` fails. If asked
-  for a `deep` candidate, say plainly when the evidence you found cannot clear
-  that bar, and prefer benchmarks that are not saturated at the top (SWE-bench
-  Pro, ARC-AGI-2, GPQA Diamond, Terminal-Bench 2.0) over ones where every
-  frontier model scores the same.
+Three things follow.
+
+- **Reasoning economy is the dominant axis for this slot, by a wide margin.**
+  An 11x difference in emitted reasoning swamped a 1.7x difference in
+  generation speed. A candidate that matches gpt-oss on score while emitting
+  three times the reasoning is a regression, and no bandwidth-side advantage
+  can compensate. Weight published evidence on thinking-token cost accordingly,
+  and say when there is none.
+- **The remaining real gap is speculation.** `deep` is the only slot with none,
+  while `fast` gets ~1.6x from its MTP head and `coder` ~1.4x from DFlash. A
+  model of comparable quality with a *verified* MTP head would land near 26-30
+  t/s in the same byte budget. That is the most valuable single property a
+  candidate can have here.
+- **The hard tier saturates `deep` at 10/10, so it justifies the slot but
+  cannot rank replacements.** The bar to clear is 10/10, under ~210 s, under
+  ~10k chars of reasoning; beating that is not measurable with the current
+  instrument. If asked for a `deep` candidate, say plainly that a harder
+  discriminator has to exist before a claimed improvement can be believed, and
+  prefer benchmarks that are not saturated at the top (SWE-bench Pro, ARC-AGI-2,
+  GPQA Diamond, Terminal-Bench 2.0) over ones where every frontier model scores
+  the same.
 
 ## How to research
 
