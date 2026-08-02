@@ -64,6 +64,9 @@ Do not spend time on these; all measured zero or negative on this hardware.
 | `spec-draft-p-min` 0.5 (and 0.2) | 0.5 over-truncates (accept 0.86-0.89 but mean len drops, tg back to baseline); 0.2 barely fires; 0.3 is the peak |
 | `GGML_VK_MAX_NODES_PER_SUBMIT = 25` | llama-bench tg +0.9%, but SERVED tg -1% - bench gains on submit granularity do not transfer to the MTP round shape |
 | `cache-idle-slots = false` | deferred, not rejected: single-stream served pp measured stable (325-327 t/s) on 2026-08-02, so the 264-311 variance it targets was not reproducible; revisit if agent-shaped pp instability recurs |
+| Vulkan: `DMMV_WG_SIZE_LARGE` on the `_id` matvec for AMD | tg -1.9% (24.69 vs 25.16) - the NVIDIA/Intel spread-the-work heuristic does not fit 12 CUs |
+| Vulkan: FA scalar path for the 2-4-row verify batches | flat at 2.6k ctx (35.09 vs 35.07 served); untested at depth |
+| Vulkan: LOWER the `mul_mat_id` vector-path threshold to 1 | tg -27% (25.79 vs 35.07 served) - expert-count prepass + matrix tiles swamp the union-read saving at tiny n; with the earlier raise-to-32 rejection this brackets the default 8 as correct on this box |
 
 ### Stage 0 of fast-opt-plan: where decode time goes (2026-08-02)
 
@@ -78,6 +81,15 @@ Measured with `GGML_VK_PERF_LOGGER_CONCURRENT` on `fast`, build b303f73:
 - `graphs reused` counter: ~72 per 256-token request ~= one per speculative
   round, i.e. only the target verify graph reuses; the MTP draft context
   rebuilds its graph on all 4 of its decodes per round (shape alternation).
+
+Stages 2-3 (2026-08-02, tested via a temporary build-vk3 router on :8081):
+the per-round n_vocab sampler clone is now guarded out in the tree (measured
+flat on tg as predicted - it sat inside the 11% CPU bubble - but verified
+acceptance-identical to five decimals, kept as an upstreamable cleanup along
+with a dangling-pointer fix in common_sampler_clone). All three Vulkan
+kernel-selection experiments measured zero or negative and were reverted;
+per-entry results in the table above. Stage 4 of fast-opt-plan (the MTP
+process/draft-step-0 merge) is the remaining structural candidate.
 
 ### Dense models do not work here
 
