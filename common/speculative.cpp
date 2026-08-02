@@ -1546,9 +1546,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     }
 
     bool uses_process_batch() const override {
-        // GGML_SPEC_MTP_LEGACY: debug toggle restoring the pre-merge flow entirely
-        static const bool force_legacy = getenv("GGML_SPEC_MTP_LEGACY") != nullptr;
-        return !force_legacy && !chain_heads && !is_mem_shared;
+        return !chain_heads && !is_mem_shared;
     }
 
     // Post-acceptance catch-up: decodes only the accepted prefix of each sequence, and
@@ -1621,10 +1619,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             const float * h_row = k == i_batch_beg[seq_id] ? pending_h[seq_id].data() : h_tgt + (size_t) (k - 1) * n_embd;
             std::memcpy(batch.embd + (size_t) (batch.n_tokens - 1) * n_embd, h_row, row_bytes);
 
-            // GGML_SPEC_MTP_NO_STEP0: debug toggle - post-acceptance catch-up without step-0 seeding
-            static const bool no_step0 = getenv("GGML_SPEC_MTP_NO_STEP0") != nullptr;
-
-            if (accepted && k == acc.i_batch_last && !no_step0) {
+            if (accepted && k == acc.i_batch_last) {
                 common_batch_add(batch, acc.id_next, acc.pos_next, { seq_id }, true);
                 std::memcpy(batch.embd + (size_t) (batch.n_tokens - 1) * n_embd, h_tgt + (size_t) k * n_embd, row_bytes);
                 i_step0_row[seq_id] = batch.n_tokens - 1;
@@ -1673,11 +1668,6 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             // the next process_batch() re-decodes id_next as its first row with this h
             std::memcpy(pending_h[seq_id].data(), h_tgt + (size_t) acc.i_batch_last * n_embd, row_bytes);
 
-            if (i_step0_row[seq_id] < 0) {
-                has_step0[seq_id] = 0;
-                continue;
-            }
-
             // draft step 0: sample the first draft candidate from the appended row
             auto * smpl = smpls[seq_id].get();
 
@@ -1691,14 +1681,6 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             std::memcpy(step0_h[seq_id].data(), llama_get_embeddings_nextn_ith(ctx_dft, i_step0_row[seq_id]), row_bytes);
 
             has_step0[seq_id] = 1;
-
-            static const bool dbg = getenv("GGML_SPEC_MTP_DEBUG") != nullptr;
-            if (dbg) {
-                const float * hin = h_tgt + (size_t) acc.i_batch_last * n_embd;
-                fprintf(stderr, "MTPDBG step0 seq=%d in=(%d@%d) hin=%.6f,%.6f -> tok=%d p=%.4f hout=%.6f\n",
-                        (int) seq_id, (int) acc.id_next, (int) acc.pos_next, hin[0], hin[1],
-                        (int) step0_tok[seq_id], step0_p[seq_id], step0_h[seq_id][0]);
-            }
         }
 
         return true;
@@ -1816,15 +1798,6 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
                 // add drafted token for each sequence
                 const llama_token id = cur_p->data[0].id;
-
-                static const bool dbg = getenv("GGML_SPEC_MTP_DEBUG") != nullptr;
-                if (dbg && i == 0) {
-                    const auto & dp0 = dparams.at(seq_id);
-                    fprintf(stderr, "MTPDBG step0 seq=%d in=(%d@%d) hin=%.6f,%.6f -> tok=%d p=%.4f hout=%.6f\n",
-                            (int) seq_id, (int) dp0.id_last, (int) dp0.n_past,
-                            pending_h[seq_id][0], pending_h[seq_id][1],
-                            (int) id, cur_p->data[0].p, h_row[0]);
-                }
 
                 // only collect very high-confidence draft tokens
                 if (cur_p->data[0].p < params.p_min) {
