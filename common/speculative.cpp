@@ -1691,6 +1691,14 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             std::memcpy(step0_h[seq_id].data(), llama_get_embeddings_nextn_ith(ctx_dft, i_step0_row[seq_id]), row_bytes);
 
             has_step0[seq_id] = 1;
+
+            static const bool dbg = getenv("GGML_SPEC_MTP_DEBUG") != nullptr;
+            if (dbg) {
+                const float * hin = h_tgt + (size_t) acc.i_batch_last * n_embd;
+                fprintf(stderr, "MTPDBG step0 seq=%d in=(%d@%d) hin=%.6f,%.6f -> tok=%d p=%.4f hout=%.6f\n",
+                        (int) seq_id, (int) acc.id_next, (int) acc.pos_next, hin[0], hin[1],
+                        (int) step0_tok[seq_id], step0_p[seq_id], step0_h[seq_id][0]);
+            }
         }
 
         return true;
@@ -1808,6 +1816,15 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
                 // add drafted token for each sequence
                 const llama_token id = cur_p->data[0].id;
+
+                static const bool dbg = getenv("GGML_SPEC_MTP_DEBUG") != nullptr;
+                if (dbg && i == 0) {
+                    const auto & dp0 = dparams.at(seq_id);
+                    fprintf(stderr, "MTPDBG step0 seq=%d in=(%d@%d) hin=%.6f,%.6f -> tok=%d p=%.4f hout=%.6f\n",
+                            (int) seq_id, (int) dp0.id_last, (int) dp0.n_past,
+                            pending_h[seq_id][0], pending_h[seq_id][1],
+                            (int) id, cur_p->data[0].p, h_row[0]);
+                }
 
                 // only collect very high-confidence draft tokens
                 if (cur_p->data[0].p < params.p_min) {
