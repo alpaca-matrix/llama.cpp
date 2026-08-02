@@ -24,18 +24,25 @@
 #
 # usage: ./reason-eval-hard.sh <alias> [effort]
 #   ./reason-eval-hard.sh deep high
+#   MAX_TOKENS=16000 ONLY='recursion-tree|reservoir' ./reason-eval-hard.sh fast
+#
+# ONLY filters by label regex and MAX_TOKENS raises the budget - together they
+# re-test the items a model truncated, to separate "cannot answer" from "needs
+# more room". A rerun under either is not comparable to a full-tier score.
 set -euo pipefail
 
 ALIAS="${1:?model alias}"
 EFFORT="${2:-}"
 HOST="${HOST:-http://127.0.0.1:8080}"
 MAX_TOKENS="${MAX_TOKENS:-8000}"
+ONLY="${ONLY:-}"
 
-ALIAS="$ALIAS" EFFORT="$EFFORT" HOST="$HOST" MAX_TOKENS="$MAX_TOKENS" python3 <<'PYEOF'
+ALIAS="$ALIAS" EFFORT="$EFFORT" HOST="$HOST" MAX_TOKENS="$MAX_TOKENS" ONLY="$ONLY" python3 <<'PYEOF'
 import json, os, re, time, urllib.request
 
 alias, host, effort = os.environ["ALIAS"], os.environ["HOST"], os.environ["EFFORT"]
 max_tokens = int(os.environ["MAX_TOKENS"])
+only = os.environ.get("ONLY") or ""
 
 # (prompt, must-match regex, must-NOT-match regex or None, label)
 TESTS = [
@@ -125,10 +132,13 @@ def ask(prompt):
     m = c["message"]
     return (m.get("content") or ""), len(m.get("reasoning_content") or ""), c.get("finish_reason")
 
+tests = [t for t in TESTS if not only or re.search(only, t[3])]
+
 label = f"{alias}" + (f" (effort={effort})" if effort else "")
-print(f"== {label} hard tier ==")
+suffix = f" [{len(tests)}/{len(TESTS)} items, max_tokens={max_tokens}]" if only or max_tokens != 8000 else ""
+print(f"== {label} hard tier{suffix} ==")
 score, trunc, total_s, total_think = 0, 0, 0.0, 0
-for prompt, pattern, anti, name in TESTS:
+for prompt, pattern, anti, name in tests:
     t0 = time.time()
     try:
         out, think, finish = ask(prompt)
@@ -152,7 +162,7 @@ for prompt, pattern, anti, name in TESTS:
     flat = " ".join(out.split())[-70:]
     print(f"  {name:18s} {verdict:5s} {dt:6.1f}s  think={think:6d}ch  ...{flat}")
 
-print(f"\n{label}: {score}/{len(TESTS)} correct, {trunc} truncated, {total_s:.0f}s total, "
+print(f"\n{label}: {score}/{len(tests)} correct, {trunc} truncated, {total_s:.0f}s total, "
       f"{total_think} chars of reasoning")
 if trunc:
     print("NOTE: truncated answers mean the budget ran out before a conclusion. "
