@@ -3654,7 +3654,12 @@ static vk_fa_tuning_params get_fa_tuning_params(const vk_device& device, uint32_
     }
 
     // scalar is faster than coopmat when N==1
-    if (n_rows == 1 && (path == FA_COOPMAT1 || path == FA_COOPMAT2)) {
+    // GGML_VK_FA_SCALAR_MAX_ROWS: measurement toggle routing small-N batches to the scalar path (fast-opt-plan 3b)
+    static const uint32_t fa_scalar_max_rows = [] {
+        const char * e = getenv("GGML_VK_FA_SCALAR_MAX_ROWS");
+        return e != nullptr ? (uint32_t) std::stoul(e) : 1u;
+    }();
+    if (n_rows <= fa_scalar_max_rows && (path == FA_COOPMAT1 || path == FA_COOPMAT2)) {
         path = FA_SCALAR;
     }
 
@@ -7716,8 +7721,11 @@ static vk_pipeline ggml_vk_get_dequantize_mul_mat_vec_id(ggml_backend_vk_context
     }
 
     // heuristic to choose workgroup size
+    // GGML_VK_DMMV_ID_LARGE_WG_AMD: measurement toggle extending the large-workgroup path to AMD (fast-opt-plan 3a)
+    static const bool dmmv_id_large_wg_amd = getenv("GGML_VK_DMMV_ID_LARGE_WG_AMD") != nullptr;
     uint32_t dmmv_wg = DMMV_WG_SIZE_SUBGROUP;
-    if ((ctx->device->vendor_id == VK_VENDOR_ID_NVIDIA && ctx->device->architecture != vk_device_architecture::NVIDIA_PRE_TURING) || ctx->device->vendor_id == VK_VENDOR_ID_INTEL) {
+    if ((ctx->device->vendor_id == VK_VENDOR_ID_NVIDIA && ctx->device->architecture != vk_device_architecture::NVIDIA_PRE_TURING) || ctx->device->vendor_id == VK_VENDOR_ID_INTEL ||
+        (dmmv_id_large_wg_amd && ctx->device->vendor_id == VK_VENDOR_ID_AMD)) {
         // Prefer larger workgroups when M is small, to spread the work out more
         // and keep more SMs busy.
         // q6_k seems to prefer small workgroup size even for "medium" values of M.
@@ -10368,7 +10376,13 @@ static bool ggml_vk_use_mul_mat_vec_id(const struct ggml_cgraph * cgraph, int no
     ggml_tensor * dst = cgraph->nodes[node_idx];
     ggml_tensor * src0 = dst->src[0];
     ggml_tensor * src2 = dst->src[2];
-    return (src2->ne[1] <= 8) && (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16 || ggml_is_quantized(src0->type));
+    // GGML_VK_MMVID_MAX_N: measurement toggle for the vector-path token threshold (fast-opt-plan 3c);
+    // the vector path dispatches once per token, so above this the expert-major matrix path takes over
+    static const uint32_t mmvid_max_n = [] {
+        const char * e = getenv("GGML_VK_MMVID_MAX_N");
+        return e != nullptr ? (uint32_t) std::stoul(e) : 8u;
+    }();
+    return (src2->ne[1] <= mmvid_max_n) && (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16 || ggml_is_quantized(src0->type));
 }
 
 static void ggml_vk_mul_mat_id(ggml_backend_vk_context * ctx, vk_context& subctx, const struct ggml_cgraph * cgraph, int node_idx) {
