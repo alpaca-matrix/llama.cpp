@@ -1546,7 +1546,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     }
 
     bool uses_process_batch() const override {
-        return !chain_heads && !is_mem_shared;
+        // GGML_SPEC_MTP_LEGACY: debug toggle restoring the pre-merge flow entirely
+        static const bool force_legacy = getenv("GGML_SPEC_MTP_LEGACY") != nullptr;
+        return !force_legacy && !chain_heads && !is_mem_shared;
     }
 
     // Post-acceptance catch-up: decodes only the accepted prefix of each sequence, and
@@ -1619,7 +1621,10 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             const float * h_row = k == i_batch_beg[seq_id] ? pending_h[seq_id].data() : h_tgt + (size_t) (k - 1) * n_embd;
             std::memcpy(batch.embd + (size_t) (batch.n_tokens - 1) * n_embd, h_row, row_bytes);
 
-            if (accepted && k == acc.i_batch_last) {
+            // GGML_SPEC_MTP_NO_STEP0: debug toggle - post-acceptance catch-up without step-0 seeding
+            static const bool no_step0 = getenv("GGML_SPEC_MTP_NO_STEP0") != nullptr;
+
+            if (accepted && k == acc.i_batch_last && !no_step0) {
                 common_batch_add(batch, acc.id_next, acc.pos_next, { seq_id }, true);
                 std::memcpy(batch.embd + (size_t) (batch.n_tokens - 1) * n_embd, h_tgt + (size_t) k * n_embd, row_bytes);
                 i_step0_row[seq_id] = batch.n_tokens - 1;
@@ -1667,6 +1672,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
             // the next process_batch() re-decodes id_next as its first row with this h
             std::memcpy(pending_h[seq_id].data(), h_tgt + (size_t) acc.i_batch_last * n_embd, row_bytes);
+
+            if (i_step0_row[seq_id] < 0) {
+                has_step0[seq_id] = 0;
+                continue;
+            }
 
             // draft step 0: sample the first draft candidate from the appended row
             auto * smpl = smpls[seq_id].get();
