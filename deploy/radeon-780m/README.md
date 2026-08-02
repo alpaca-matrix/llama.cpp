@@ -88,8 +88,53 @@ flat on tg as predicted - it sat inside the 11% CPU bubble - but verified
 acceptance-identical to five decimals, kept as an upstreamable cleanup along
 with a dangling-pointer fix in common_sampler_clone). All three Vulkan
 kernel-selection experiments measured zero or negative and were reverted;
-per-entry results in the table above. Stage 4 of fast-opt-plan (the MTP
-process/draft-step-0 merge) is the remaining structural candidate.
+per-entry results in the table above.
+
+### The MTP catch-up decode cannot absorb draft step 0
+
+Stage 4 of fast-opt-plan, built and measured 2026-08-02, then reverted.
+
+Per round, `draft-mtp` runs four decodes on the draft context: `n_max`
+drafting steps plus a catch-up decode (`common_speculative_process`) that
+replays the verify batch with the target's hidden states. The catch-up runs
+*before* acceptance is known, so it also re-evaluates the rejected tail. The
+idea was to move it after acceptance, decode only the accepted prefix, and
+append one logits row for the token the target just sampled - making the same
+decode produce draft step 0 and removing one decode plus one synchronize per
+round.
+
+It works, and it is slower. Measured on `fast`:
+
+| condition | tg | acceptance | mean draft len |
+|---|---|---|---|
+| baseline | 35.07 | 0.85 | 3.51 |
+| catch-up after acceptance, no step-0 merge | 34.68 | 0.85 | 3.51 |
+| full merge | **26.41** | **0.57** | 2.55 |
+
+Step 0's *token* comes out correct - it matched the baseline token on every
+sampled round, with probabilities agreeing to about 1%. Its *hidden state*
+does not: 1.120066 against -2.698365 on the same input pair. That hidden
+state is the input embedding for steps 1 and 2, so those drafts are computed
+from a corrupted `h` and get rejected, which is the whole regression.
+
+The reason is a KV invariant that is easy to miss. After drafting, the server
+removes the speculated region from the draft context (`ckpt.pos_max + 1`), and
+nothing refills it until the next catch-up call. So the legacy step-0 decode
+deliberately runs with a *hole* where the accepted tokens' KV would be. The
+merged version fills that region in first, because it must decode the accepted
+rows to place the step-0 row after them. Same token, same position, same input
+embedding - different attention context, therefore a different hidden state.
+That hole is what `[TAG_SPEC_AVOID_DRAFT_REEVAL]`'s "always re-evaluate for
+simplicity" is holding in place.
+
+Worth knowing before attempting this again: moving the catch-up after
+acceptance is itself sound and costs nothing (row two of the table, within
+noise of baseline), so the acceptance-aware plumbing is reusable. What does
+not work is deriving step 0 from a decode that has already materialised the
+accepted KV. Any future attempt has to reproduce the legacy attention context
+exactly, and must be gated on a token-for-token acceptance match rather than
+on throughput - the token stream alone looks correct here while the drafts
+behind it are not.
 
 ### Dense models do not work here
 

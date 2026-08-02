@@ -1,15 +1,18 @@
 # fast-opt-plan: optimize the `fast` serving path (Ornith-1.0-35B MTP)
 
-Status: Stages 0-3 COMPLETE (2026-08-02), results in README.md. Outcomes:
+Status: ALL STAGES COMPLETE (2026-08-02), results in README.md. Net result:
+`fast` serves at ~35.1-35.3 t/s, up from 34.5. Stage 4 was built, measured and
+REVERTED - the merged step-0 decode corrupts the draft hidden state because the
+legacy flow relies on a KV hole in the draft context; see "The MTP catch-up
+decode cannot absorb draft step 0" in README.md before retrying it. Outcomes:
 Stage 0 bubble ~11% decode / ~1% prefill (GPU-bound). Stage 1: p-min 0.3
 landed (+2% tg, 34.54 -> 35.27), q8_0 draft KV landed (flat, half the KV),
 cache-idle-slots deferred (variance not reproducible), MAX_NODES_PER_SUBMIT
 rejected (bench +0.9% inverts to -1% served). Stage 2: clone guard + dangling
 pointer fix landed (flat tg, acceptance-identical, upstreamable). Stage 3: all
 three rejected (3a -1.9%, 3b flat, 3c -27%), toggles reverted.
-Stage 4 (process/draft-step-0 merge) is NOT started and is the remaining item.
-All file:line references below were verified on 2026-08-02 before stages 0-3
-landed; re-verify line numbers against the tree before starting Stage 4.
+All file:line references below were verified on 2026-08-02; re-verify them
+against the tree before acting on this document.
 
 ## Context
 
