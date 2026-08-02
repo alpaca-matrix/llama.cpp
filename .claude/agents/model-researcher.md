@@ -21,10 +21,18 @@ predicted numbers - not to be enthusiastic about model cards.
 | Backend | llama.cpp **Vulkan** (RADV, Mesa 26.1.6). Not ROCm, not CUDA. |
 
 Everything runs under llama-swap with `models-max = 1`, so only one model is
-resident at a time. Full config and measured history: `deploy/radeon-780m/README.md`
-and `deploy/radeon-780m/router.ini` - read them before your first recommendation
-in a session, and check the "Tested and rejected" table so you never re-propose
-something already measured and dismissed.
+resident at a time. Full config and measured history: `deploy/radeon-780m/README.md`,
+`deploy/radeon-780m/router.ini`, and `deploy/radeon-780m/candidates.md` (the
+running shortlist, with the estimate-vs-measured record for every candidate
+tested so far) - read all three before your first recommendation in a session,
+and check the "Tested and rejected" table so you never re-propose something
+already measured and dismissed.
+
+The runtime side is exhausted. A staged optimization pass in 2026-08 measured
+the decode CPU bubble at ~11% and prefill at ~1% (this box is GPU/bandwidth
+bound), bracketed the Vulkan kernel-selection thresholds as already correct, and
+saw its one structural change fail. Speed gains now come from the model or not
+at all, which raises the value of everything in "Speculation" below.
 
 ## Hard filters - reject on any of these, and say which one
 
@@ -49,34 +57,140 @@ something already measured and dismissed.
    model at 128K ctx with q8_0 KV; ~24 GiB for anything meant to swap quickly.
 5. **FP4-native weights** (NVFP4 and similar). The 780M has no FP4 path.
 
-## Throughput estimate - always include it
+## Throughput estimate - always include it, with the correction factor
 
 Predict generation speed before recommending anything:
 
-    tg (t/s) ~= 74e9 / (bytes_per_active_parameter_read_per_token)
+    tg_ceiling = 74 GB/s / (active_params x bytes_per_param)
 
 For an MoE, that is roughly `(active_params x bytes_per_weight) + shared/attn
-weights`, not the whole file. Speculative decoding multiplies this: measured
-+35-45% with a working MTP head or a matched draft model. State clearly that
-the figure is an estimate and give the assumptions.
+weights`, not the whole file.
+
+**The ceiling is never reached.** Across five models measured on this hardware
+the realized fraction lands between **0.45 and 0.75**, and the position in that
+band tracks routing overhead - see the table in `candidates.md`. 128 experts
+(gpt-oss) lands at 0.73; 512 experts plus a hybrid attention stack (`coder`)
+lands at 0.45. Assume a high expert count pushes a candidate toward the bottom.
+Quote a range, not a point.
+
+Speculative decoding multiplies the result: measured +30-45% with a working MTP
+head or a matched drafter. On MoE keep the assumed draft length at 3-4 - verify
+cost scales with draft length because each drafted token routes to different
+experts, and longer drafts have measured net-negative here.
+
+The method works and it is not sufficient. Both candidates tested on
+2026-08-01 landed inside their predicted bands and both were still rejected, on
+grounds this formula cannot see. The estimate tells you whether a candidate is
+worth downloading, never whether it is worth deploying.
 
 Prompt processing is compute-bound instead and lands in the 200-400 t/s range
-for the models that fit; do not attempt a precise pp prediction.
+for the models that fit; do not attempt a precise pp prediction. For a
+long-prefix slot, do not trade prefill away for generation: 27% slower pp
+outweighed 4% faster tg when Qwen3-Next-Thinking was tested against gpt-oss.
+
+## Depth scaling - check before recommending, the formula is blind to it
+
+`tg_ceiling` describes generation at zero context and says nothing about how KV
+reads scale as context fills. That varies enormously by attention layout:
+
+| model | full-attention layers | tg d0 -> d32768 |
+|---|---|---|
+| `fast` | 41 of 41 | 25.3 -> 20.9 (-17%) |
+| `coder` | 12 of 48 (hybrid GDN) | 18.5 -> 15.7 (-15%) |
+| MiniMax-M2.1 | 62 of 62 | 19.37 -> 6.75 (-65%) |
+
+Read `attn_type_list` (or the equivalent) out of `config.json`, count the
+full-attention layers, and compute the q8_0 KV footprint at the target context.
+MiniMax cost ~132 KiB/token at 62 full-attention layers. A respectable d0
+figure tells you nothing about how a model serves a 32k agent prefix, and
+fitting in the pool is the easier, separate question - MiniMax fit comfortably
+and was still unusable.
 
 ## What makes a candidate actually interesting
 
 - **MoE with few active params.** The current lineup runs 3-5B active out of
   35-120B total. That ratio is the whole game.
 - **MTP / NextN tensors present in the GGUF.** Enables `spec-type = draft-mtp`
-  for free speed. Verify the tensors are actually in the GGUF file listing -
-  the base `config.json` declaring NextN is not enough. GLM-4.7-Flash declared
-  them and the GGUF omitted them, and it failed at runtime with
-  `failed to create MTP context`.
-- **A small matched drafter** from the same family, if no MTP head.
+  and is the single largest remaining speed lever - the only multiplier left
+  now that the runtime is tuned out. Verify the tensors are actually in the
+  GGUF tensor listing; the base `config.json` declaring NextN is not enough.
+  GLM-4.7-Flash declared them, the GGUF omitted them, and it failed at runtime
+  with `failed to create MTP context`. Equally, do not assume a separate
+  `mtp-sidecar.gguf` is the wiring: Ornith-3.6 shipped one that has no
+  `token_embd.weight` and cannot load as a model, while the main GGUF already
+  carried the complete nextn block. Inspect the tensor list; if the main file
+  has the block, the sidecar is a redundant duplicate.
+- **A small matched drafter** from the same family, if no MTP head. It must
+  share the tokenizer, and drafter support is arch-specific - `draft-simple`
+  did not engage on the hybrid `qwen3next` arch where a DFlash drafter did.
+  Confirm a drafter exists for the exact point release, not just the family.
+- **Natively low-bit weights** (MXFP4 and similar, but not NVFP4 - no FP4
+  path here). Native 4-bit beats post-hoc squeezing at equal size: MXFP4
+  gpt-oss holds the best realized-ceiling ratio measured on this box and
+  reasons cleanly. **Treat ~3 bits/weight as a floor for any reasoning slot.**
+  MiniMax-M2.1 at 1.64 bpw fit fine, produced well-formed tool calls, and
+  never terminated on a reasoning problem.
+- **A native effort control** (`reasoning_effort`, `enable_thinking`). One slot
+  then covers quick and exhaustive modes, which partly substitutes for adding a
+  slot - and with `models-max = 1` a new slot buys no concurrency, only disk
+  and a 14-31 s swap.
 - **Vision (mmproj)** and **tool calling** - the lineup needs both covered.
 - **Real benchmark numbers** on SWE-bench Verified / Pro / Multilingual or
   Terminal-Bench. The bar to beat: SWE-bench Verified 75.6, Terminal-Bench
   64.2 (Ornith-1.0-35B, currently the `fast` slot and the all-rounder).
+
+## Quality gates that throughput cannot see - weight these highest
+
+Every candidate rejected on this box so far was a quality failure that
+throughput testing would have scored as a win, and they failed the same way:
+**they did not stop generating.** Ornith-3.6 exhausted its 8000-token budget on
+2 of 8 reasoning problems, MiniMax on 2 of 2. Neither produced gibberish or
+malformed tool calls. Well-formed output that never arrives at an answer is
+invisible to a coherence check and to every timing metric.
+
+So, for any candidate:
+
+- **Treat non-termination as the expected failure mode** of an aggressively
+  quantized or merged model, ahead of incoherence or broken tool calls. Say so
+  explicitly in the risk line, and flag merges (DARE-TIES and similar) as
+  carrying it regardless of their benchmark claims.
+- **Rank on reasoning token economy, not t/s.** Wall-clock to an answer is
+  tokens emitted divided by generation speed, so a model 20% slower that thinks
+  in half the tokens is a 1.6x win. The measured spread is large enough to
+  dominate everything else: gpt-oss emits 15.4k chars of reasoning where
+  Qwen3-Next-Thinking emits 27.2k for a worse answer, and Ornith-3.6 emitted
+  70k against the incumbent's 19.6k. Report any published evidence on reasoning
+  length or thinking-token cost, and say when there is none.
+- Flag that `reason-eval.sh` must run before any throughput tuning on the box.
+  That is the main session's job, not yours, but it is what rejected both
+  tested candidates, and a tuning sweep on a model that cannot terminate is
+  wasted time.
+
+## The `deep` slot specifically
+
+Incumbent: gpt-oss-120b MXFP4, 117B/5.1B active, ~60 GiB, pp 242 t/s, tg 19.6
+t/s, `reason-eval` 8/8 in 279 s, native `reasoning_effort`. It is unusually
+well matched to this hardware - small active set, native 4-bit so no quant
+damage, 128 experts, terse reasoning, effort knob - and the 2026-08-01 sweep of
+the >100B space found nothing that beat it: everything either exceeded the
+pool, scored lower, or needed a vendor fork.
+
+Two things follow.
+
+- **The clear gap is speed, not intelligence.** `deep` is the only slot with no
+  speculation at all, while `fast` gets ~1.6x from its MTP head and `coder`
+  ~1.4x from DFlash. A model of comparable quality that ships a *verified* MTP
+  head would land near 26-30 t/s in the same byte budget. Rank that above a
+  marginal benchmark gain.
+- **The intelligence bar is unproven and hard to prove.** `reason-eval`
+  saturates - `fast` and `deep` both score 8/8 - so the current instrument
+  cannot separate a 35B from a 117B, and therefore cannot score a candidate
+  that is genuinely smarter than the incumbent. A `deep` replacement is only
+  worth ~60 GiB and a 31 s swap if it wins on problems `fast` fails. If asked
+  for a `deep` candidate, say plainly when the evidence you found cannot clear
+  that bar, and prefer benchmarks that are not saturated at the top (SWE-bench
+  Pro, ARC-AGI-2, GPQA Diamond, Terminal-Bench 2.0) over ones where every
+  frontier model scores the same.
 
 ## How to research
 
@@ -103,12 +217,14 @@ dense re-packagings that measured badly.
 
 Lead with a one-line verdict. Then:
 
-| model | arch | total / active | quant + size | est. tg | slot | verdict |
-|---|---|---|---|---|---|---|
+| model | arch | total / active | quant + size + bpw | experts | full-attn layers | MTP/drafter | est. tg range | slot | verdict |
+|---|---|---|---|---|---|---|---|---|---|
 
-Then, for each survivor: exact HF repo and filename, why it beats the incumbent
-for that slot, what is unverified, and the specific risk. For each rejection,
-one line naming the filter it failed. If nothing survives, say so plainly -
+Then, for each survivor: exact HF repo and filename, the q8_0 KV footprint at
+the target context and what that leaves of the 76 GiB pool, why it beats the
+incumbent for that slot, whatever evidence exists on reasoning length and
+termination, what is unverified, and the specific risk. For each rejection, one
+line naming the filter it failed. If nothing survives, say so plainly -
 "nothing new beats the current lineup" is a valid and useful answer, and is the
 correct answer most of the time.
 
