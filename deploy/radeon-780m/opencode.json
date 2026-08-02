@@ -1,0 +1,33 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "llama-local/fast",
+  "small_model": "llama-local/fast",
+  "provider": {
+    "llama-local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Radeon 780M llama-server",
+      "options": {
+        "baseURL": "http://192.168.254.250:8080/v1",
+        "apiKey": "local"
+      },
+      "models": {
+        "fast": {
+          "name": "fast - Ornith-1.0-35B MTP-APEX",
+          "limit": { "context": 131072 }
+        },
+        "coder": {
+          "name": "coder - Qwen3-Coder-Next + DFlash",
+          "limit": { "context": 131072 }
+        },
+        "assist": {
+          "name": "assist - Qwen3-VL-30B-A3B",
+          "limit": { "context": 131072 }
+        },
+        "deep": {
+          "name": "deep - gpt-oss-120b",
+          "limit": { "context": 131072 }
+        }
+      }
+    }
+  }
+}
