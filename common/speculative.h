@@ -58,6 +58,32 @@ void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, co
 // process the batch and update the internal state of the speculative context
 bool common_speculative_process(common_speculative * spec, const llama_batch & batch);
 
+// per-sequence acceptance info for common_speculative_process_batch
+enum common_speculative_seq_state {
+    COMMON_SPECULATIVE_SEQ_NONE = 0,  // rows (if any) are prompt processing - no acceptance this batch
+    COMMON_SPECULATIVE_SEQ_ACCEPTED,  // target sampled id_next from row i_batch_last; later rows were rejected
+    COMMON_SPECULATIVE_SEQ_SKIP,      // state was rolled back - ignore this sequence's rows entirely
+};
+
+struct common_speculative_seq_accept {
+    common_speculative_seq_state state = COMMON_SPECULATIVE_SEQ_NONE;
+
+    int32_t     i_batch_last = -1;               // batch row (relative to the processed view) id_next was sampled from
+    llama_token id_next      = LLAMA_TOKEN_NULL; // the token the target just sampled
+    llama_pos   pos_next     = -1;               // the position id_next will occupy
+};
+
+// post-acceptance variant of common_speculative_process: lets an implementation skip the
+// rejected draft tail and combine its state catch-up with the start of the next draft
+// call this instead of common_speculative_process when common_speculative_uses_process_batch()
+bool common_speculative_process_batch(common_speculative * spec, const llama_batch & batch,
+        const std::vector<common_speculative_seq_accept> & accepts);
+
+// true when the active implementations consume acceptance info via process_batch; the caller
+// should then invoke process_batch after acceptance instead of process, and leave the cleanup
+// of the draft context's speculated region to the implementation
+bool common_speculative_uses_process_batch(const common_speculative * spec);
+
 // true if any implementation requires target post-norm embeddings to be extracted
 bool common_speculative_need_embd(common_speculative * spec);
 

@@ -164,6 +164,17 @@ struct common_speculative_impl {
 
     virtual bool process(const llama_batch & batch) = 0;
 
+    // post-acceptance variant of process(); implementations that do not consume
+    // acceptance info fall back to the plain process()
+    virtual bool process_batch(const llama_batch & batch, const std::vector<common_speculative_seq_accept> & accepts) {
+        GGML_UNUSED(accepts);
+        return process(batch);
+    }
+
+    // true if this implementation wants process_batch() called after acceptance
+    // instead of process() after decode
+    virtual bool uses_process_batch() const { return false; }
+
     virtual void draft(common_speculative_draft_params_vec & dparams) = 0;
 
     virtual void accept(llama_seq_id seq_id, uint16_t n_accepted, bool is_other) = 0;
@@ -1279,6 +1290,14 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     std::vector<std::vector<float>> verify_h;
     std::vector<int32_t> verify_h_rows;
 
+    // Draft step 0 produced by process_batch() together with the KV catch-up, one
+    // decode earlier than draft() would produce it. Consumed by the next draft() call.
+    std::vector<uint8_t>            has_step0;
+    std::vector<llama_token>        step0_tok;
+    std::vector<float>              step0_p;
+    std::vector<std::vector<float>> step0_h;
+    std::vector<int32_t>            i_step0_row;
+
     std::vector<int>                i_last;
     std::vector<std::vector<float>> chain_h;
 
@@ -1305,7 +1324,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                 ctx_dft ? "yes" : "no",
                 common_speculative_get_devices_str(this->params.devices).c_str());
 
-        const int32_t n_b = (int32_t) llama_n_batch(ctx_dft);
+        // + n_seq rows of headroom for the step-0 rows process_batch() appends
+        const int32_t n_b = (int32_t) llama_n_batch(ctx_dft) + (int32_t) n_seq;
         batch = llama_batch_init(/*n_tokens=*/ n_b, /*embd=*/ n_embd, /*n_seq_max=*/ 1);
         // llama_batch_init allocates only one of token/embd; MTP needs both.
         // TODO: fix, how to call without malloc
@@ -1359,6 +1379,12 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
         verify_h.assign(n_seq, {});
         verify_h_rows.assign(n_seq, 0);
+
+        has_step0.assign(n_seq, 0);
+        step0_tok.assign(n_seq, LLAMA_TOKEN_NULL);
+        step0_p.assign(n_seq, 0.0f);
+        step0_h.assign(n_seq, std::vector<float>(n_embd, 0.0f));
+        i_step0_row.assign(n_seq, -1);
     }
 
     ~common_speculative_impl_draft_mtp() override {
@@ -1382,6 +1408,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     }
 
     void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
+        has_step0[seq_id] = 0;
+
         const int32_t N = (int32_t) prompt.size();
         if (N <= 0) {
             return;
@@ -1517,6 +1545,147 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         return true;
     }
 
+    bool uses_process_batch() const override {
+        return !chain_heads && !is_mem_shared;
+    }
+
+    // Post-acceptance catch-up: decodes only the accepted prefix of each sequence, and
+    // appends one logits row for the token the target just sampled so that this single
+    // decode also produces draft step 0 - one llama_decode less per round than
+    // process() + the first decode of draft().
+    bool process_batch(const llama_batch & batch_in, const std::vector<common_speculative_seq_accept> & accepts) override {
+        if (!uses_process_batch()) {
+            return process(batch_in);
+        }
+
+        if (batch_in.n_tokens <= 0) {
+            return true;
+        }
+
+        // TODO: how to make it work with vision tokens?
+        if (batch_in.token == nullptr || batch_in.embd != nullptr) {
+            return true;
+        }
+
+        GGML_ASSERT(accepts.size() == n_seq);
+
+        const int32_t n_tokens = batch_in.n_tokens;
+
+        std::fill(i_batch_beg.begin(), i_batch_beg.end(), -1);
+        std::fill(i_batch_end.begin(), i_batch_end.end(), -1);
+
+        for (int k = 0; k < n_tokens; ++k) {
+            GGML_ASSERT(batch_in.n_seq_id[k] == 1);
+
+            const llama_seq_id seq_id = batch_in.seq_id[k][0];
+            GGML_ASSERT(seq_id >= 0 && seq_id < (llama_seq_id) n_seq);
+
+            i_batch_end[seq_id] = k;
+            if (i_batch_beg[seq_id] < 0) {
+                i_batch_beg[seq_id] = k;
+            }
+        }
+
+        auto * ctx_tgt = this->params.ctx_tgt;
+        auto * ctx_dft = this->params.ctx_dft;
+        auto * mem_dft = llama_get_memory(ctx_dft);
+
+        const size_t row_bytes = (size_t) n_embd * sizeof(float);
+
+        const float * h_tgt = llama_get_embeddings_nextn(ctx_tgt);
+
+        common_batch_clear(batch);
+
+        std::fill(i_step0_row.begin(), i_step0_row.end(), -1);
+
+        for (int k = 0; k < n_tokens; ++k) {
+            const llama_seq_id seq_id = batch_in.seq_id[k][0];
+
+            const auto & acc = accepts[seq_id];
+
+            if (acc.state == COMMON_SPECULATIVE_SEQ_SKIP) {
+                continue;
+            }
+
+            const bool accepted = acc.state == COMMON_SPECULATIVE_SEQ_ACCEPTED;
+
+            if (accepted && k > acc.i_batch_last) {
+                continue; // rejected draft tail
+            }
+
+            // same shift-by-one pairing as process(): token k pairs with the h of k-1,
+            // and each sequence's first row pairs with the h carried over from last time
+            common_batch_add(batch, batch_in.token[k], batch_in.pos[k], { seq_id }, false);
+            const float * h_row = k == i_batch_beg[seq_id] ? pending_h[seq_id].data() : h_tgt + (size_t) (k - 1) * n_embd;
+            std::memcpy(batch.embd + (size_t) (batch.n_tokens - 1) * n_embd, h_row, row_bytes);
+
+            if (accepted && k == acc.i_batch_last) {
+                common_batch_add(batch, acc.id_next, acc.pos_next, { seq_id }, true);
+                std::memcpy(batch.embd + (size_t) (batch.n_tokens - 1) * n_embd, h_tgt + (size_t) k * n_embd, row_bytes);
+                i_step0_row[seq_id] = batch.n_tokens - 1;
+            }
+        }
+
+        if (batch.n_tokens == 0) {
+            return true;
+        }
+
+        // the accepted region is re-decoded with the target's h, so drop whatever the
+        // previous draft() round wrote there (replaces the caller-side draft wipe)
+        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
+            if (i_batch_beg[seq_id] < 0 || accepts[seq_id].state != COMMON_SPECULATIVE_SEQ_ACCEPTED) {
+                continue;
+            }
+
+            llama_memory_seq_rm(mem_dft, seq_id, batch_in.pos[i_batch_beg[seq_id]], -1);
+        }
+
+        const int32_t rc = llama_decode(ctx_dft, batch);
+        if (rc != 0) {
+            SPC_ERR("llama_decode(ctx_dft) failed rc=%d (pos=%d)\n", (int) rc, (int) batch_in.pos[0]);
+            return false;
+        }
+
+        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
+            if (i_batch_beg[seq_id] < 0) {
+                continue;
+            }
+
+            const auto & acc = accepts[seq_id];
+
+            if (acc.state == COMMON_SPECULATIVE_SEQ_NONE) {
+                // prompt rows: carry the last h forward, same as process()
+                has_step0[seq_id] = 0;
+                std::memcpy(pending_h[seq_id].data(), h_tgt + (size_t) i_batch_end[seq_id] * n_embd, row_bytes);
+                continue;
+            }
+
+            if (acc.state != COMMON_SPECULATIVE_SEQ_ACCEPTED) {
+                has_step0[seq_id] = 0;
+                continue;
+            }
+
+            // the next process_batch() re-decodes id_next as its first row with this h
+            std::memcpy(pending_h[seq_id].data(), h_tgt + (size_t) acc.i_batch_last * n_embd, row_bytes);
+
+            // draft step 0: sample the first draft candidate from the appended row
+            auto * smpl = smpls[seq_id].get();
+
+            common_sampler_reset(smpl);
+            common_sampler_sample(smpl, ctx_dft, i_step0_row[seq_id], true);
+
+            const auto * cur_p = common_sampler_get_candidates(smpl, true);
+
+            step0_tok[seq_id] = cur_p->data[0].id;
+            step0_p[seq_id]   = cur_p->data[0].p;
+            std::memcpy(step0_h[seq_id].data(), llama_get_embeddings_nextn_ith(ctx_dft, i_step0_row[seq_id]), row_bytes);
+
+            has_step0[seq_id] = 1;
+        }
+
+        return true;
+    }
+
     void draft(common_speculative_draft_params_vec & dparams) override {
         auto & ctx_dft = params.ctx_dft;
 
@@ -1532,6 +1701,36 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             auto & dp = dparams[seq_id];
 
             if (!dp.drafting) {
+                continue;
+            }
+
+            if (has_step0[seq_id]) {
+                // step 0 was already produced by process_batch() together with the KV
+                // catch-up - consume it and continue drafting from step 1
+                has_step0[seq_id] = 0;
+
+                if (step0_p[seq_id] < params.p_min) {
+                    continue; // no draft this round
+                }
+
+                auto & result = *dp.result;
+                result.push_back(step0_tok[seq_id]);
+
+                if (params.n_max <= (int) result.size()) {
+                    continue;
+                }
+
+                n_drafting++;
+                drafting[seq_id] = true;
+                // note: the top-k-only draft chain is stateless, so skipping the
+                // common_sampler_accept of the step-0 token changes nothing
+                common_sampler_reset(smpls[seq_id].get());
+
+                common_batch_add(batch, step0_tok[seq_id], dp.n_past + 1, { seq_id }, true);
+                std::memcpy(batch.embd + (size_t) (batch.n_tokens - 1) * n_embd, step0_h[seq_id].data(), row_bytes);
+
+                i_last[seq_id] = batch.n_tokens - 1;
+
                 continue;
             }
 
@@ -1638,7 +1837,10 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                     common_batch_add(batch, id, dp.n_past, { seq_id }, true);
                     std::memcpy(batch.embd + (size_t) (batch.n_tokens - 1) * n_embd, h_row, row_bytes);
                 } else {
-                    common_batch_add(batch, id, dp.n_past + i + 1, { seq_id }, true);
+                    // result[j] sits at n_past + 1 + j, so the token just pushed goes to
+                    // n_past + result.size(); unlike the loop counter this also holds for
+                    // sequences seeded from a process_batch() step 0
+                    common_batch_add(batch, id, dp.n_past + (llama_pos) result.size(), { seq_id }, true);
                     std::memcpy(batch.embd + (size_t) (batch.n_tokens - 1) * n_embd, h_row, row_bytes);
                 }
 
@@ -2568,6 +2770,35 @@ bool common_speculative_process(common_speculative * spec, const llama_batch & b
     }
 
     return result;
+}
+
+bool common_speculative_process_batch(common_speculative * spec, const llama_batch & batch,
+        const std::vector<common_speculative_seq_accept> & accepts) {
+    bool result = true;
+
+    if (spec == nullptr) {
+        return result;
+    }
+
+    for (auto & impl : spec->impls) {
+        result = result && impl->process_batch(batch, accepts);
+    }
+
+    return result;
+}
+
+bool common_speculative_uses_process_batch(const common_speculative * spec) {
+    if (spec == nullptr) {
+        return false;
+    }
+
+    for (auto & impl : spec->impls) {
+        if (impl->uses_process_batch()) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 bool common_speculative_need_embd(common_speculative * spec) {

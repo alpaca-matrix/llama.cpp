@@ -2993,8 +2993,12 @@ private:
                     ckpt.load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                 }
 
-                if (!llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, ckpt.pos_max + 1, -1)) {
-                    GGML_ABORT("failed to remove sequence %d\n", slot.id);
+                // when the impl consumes acceptance info, it clears and rebuilds the
+                // speculated region itself in process_batch()
+                if (!common_speculative_uses_process_batch(spec.get())) {
+                    if (!llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, ckpt.pos_max + 1, -1)) {
+                        GGML_ABORT("failed to remove sequence %d\n", slot.id);
+                    }
                 }
             }
 
@@ -3632,14 +3636,15 @@ private:
             return false; // retry with the updated n_batch
         }
 
-        // TODO: avoid restoring the draft context and re-evaluating the drafted tokens when not needed [TAG_SPEC_AVOID_DRAFT_REEVAL]
-        //       for now, always re-evaluate for simplicity
-        //       ref: https://github.com/ggml-org/llama.cpp/pull/22728#issuecomment-4400925384
-        if (!common_speculative_process(spec.get(), batch_view)) {
-            SRV_ERR("%s", "failed to process speculative batch\n");
+        // implementations that consume acceptance info are processed after acceptance
+        // instead, from post_decode() [TAG_SPEC_AVOID_DRAFT_REEVAL]
+        if (!common_speculative_uses_process_batch(spec.get())) {
+            if (!common_speculative_process(spec.get(), batch_view)) {
+                SRV_ERR("%s", "failed to process speculative batch\n");
 
-            // TODO: handle error
-            throw std::runtime_error("failed to process speculative batch");
+                // TODO: handle error
+                throw std::runtime_error("failed to process speculative batch");
+            }
         }
 
         // handle `n_cmpl > 1` tasks - when the main prompt is processed, activate all child tasks too
@@ -3673,6 +3678,14 @@ private:
         auto is_inside_view = [&](int32_t idx) {
             return idx >= off && idx < off + n_batch_tokens;
         };
+
+        // per-seq acceptance info for the post-acceptance speculative catch-up
+        const bool spec_batch = spec && common_speculative_uses_process_batch(spec.get());
+
+        std::vector<common_speculative_seq_accept> spec_accepts;
+        if (spec_batch) {
+            spec_accepts.resize(slots.size());
+        }
 
         // TODO @ngxson : it's tricky to make sub-batch compatible with common_sampler_sample_and_accept_n,
         // so for now we will throw an error in this case: https://github.com/ggml-org/llama.cpp/issues/24840
@@ -3747,6 +3760,15 @@ private:
 
             common_sampler_accept(slot.smpl.get(), id, true);
 
+            if (spec_batch) {
+                auto & acc = spec_accepts[slot.id];
+
+                acc.state        = COMMON_SPECULATIVE_SEQ_ACCEPTED;
+                acc.i_batch_last = tok_idx;
+                acc.id_next      = id;
+                acc.pos_next     = batch_view.pos[tok_idx] + 1;
+            }
+
             // here we have synchronized the llama_context (due to the sampling above), so we can do time measurement
             const int64_t t_now = ggml_time_us();
 
@@ -3795,6 +3817,9 @@ private:
 
             GGML_ASSERT(n_draft > 0);
 
+            // the batch row (relative to this view) the last accepted token was sampled from
+            int32_t i_batch_last = -1;
+
             // verify and try to accept the draft
             {
                 // the saved sampler state is only consumed by the use_ckpt_tgt restore below;
@@ -3809,9 +3834,12 @@ private:
 
                 GGML_ASSERT(slot.spec_i_batch.size() == n_draft + 1);
                 auto accepted = common_sampler_sample_and_accept_n(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft);
-                slot.spec_i_batch.clear();
 
                 GGML_ASSERT(accepted.size() >= 1);
+
+                i_batch_last = slot.spec_i_batch[accepted.size() - 1] - off;
+
+                slot.spec_i_batch.clear();
 
                 const uint32_t n_rollback = slot.spec_draft.size() + 1 - accepted.size();
 
@@ -3845,6 +3873,10 @@ private:
 
                         GGML_ASSERT(smpl_save && "use_ckpt_tgt implies may_restore");
                         slot.smpl = std::move(smpl_save);
+
+                        if (spec_batch) {
+                            spec_accepts[slot.id].state = COMMON_SPECULATIVE_SEQ_SKIP;
+                        }
 
                         return;
                     }
@@ -3885,6 +3917,15 @@ private:
 
             slot.mem.seq_rm(slot.id, slot.prompt.tokens.pos_next(), -1);
 
+            if (spec_batch) {
+                auto & acc = spec_accepts[slot.id];
+
+                acc.state        = COMMON_SPECULATIVE_SEQ_ACCEPTED;
+                acc.i_batch_last = i_batch_last;
+                acc.id_next      = slot.sampled;
+                acc.pos_next     = slot.prompt.tokens.pos_next();
+            }
+
             for (size_t i = 0; i < ids.size(); ++i) {
                 completion_token_output result;
 
@@ -3910,6 +3951,18 @@ private:
 
             SLT_DBG(slot, "accepted %d/%d draft tokens, new n_tokens = %d\n", (int) ids.size() - 1, (int) n_draft, slot.prompt.n_tokens());
         });
+
+        // post-acceptance speculative catch-up: decodes the accepted rows into the draft
+        // context and seeds the next round's draft step 0 in the same llama_decode
+        // must run before the next llama_decode(ctx_tgt) invalidates the nextn embeddings
+        if (spec_batch) {
+            if (!common_speculative_process_batch(spec.get(), batch_view, spec_accepts)) {
+                SRV_ERR("%s", "failed to process speculative batch\n");
+
+                // TODO: handle error
+                throw std::runtime_error("failed to process speculative batch");
+            }
+        }
     }
 
     int get_slot_n_ctx() {
