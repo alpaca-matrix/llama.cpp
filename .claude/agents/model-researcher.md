@@ -69,8 +69,9 @@ weights`, not the whole file.
 **The ceiling is never reached.** Across five models measured on this hardware
 the realized fraction lands between **0.45 and 0.75**, and the position in that
 band tracks routing overhead - see the table in `candidates.md`. 128 experts
-(gpt-oss) lands at 0.73; 512 experts plus a hybrid attention stack (`coder`)
-lands at 0.45. Assume a high expert count pushes a candidate toward the bottom.
+(gpt-oss) lands at 0.73; 512 experts plus a hybrid attention stack
+(Qwen3-Coder-Next, which held the `coder` alias until 2026-08-03) lands at 0.45.
+Assume a high expert count pushes a candidate toward the bottom.
 Quote a range, not a point.
 
 Speculative decoding multiplies the result: measured +30-45% with a working MTP
@@ -95,8 +96,8 @@ reads scale as context fills. That varies enormously by attention layout:
 
 | model | full-attention layers | tg d0 -> d32768 |
 |---|---|---|
-| `fast` | 41 of 41 | 25.3 -> 20.9 (-17%) |
-| `coder` | 12 of 48 (hybrid GDN) | 18.5 -> 15.7 (-15%) |
+| `fast` (Ornith-1.0-35B) | 41 of 41 | 25.3 -> 20.9 (-17%) |
+| Qwen3-Coder-Next (ex-`coder`) | 12 of 48 (hybrid GDN) | 18.5 -> 15.7 (-15%) |
 | MiniMax-M2.1 | 62 of 62 | 19.37 -> 6.75 (-65%) |
 
 Read `attn_type_list` (or the equivalent) out of `config.json`, count the
@@ -223,9 +224,63 @@ Work from primary sources and prefer evidence over claims:
   for known breakage on the Vulkan backend specifically.
 
 Corroborate anything decision-relevant against a second source, and say which
-claims you could not verify. Be skeptical of merge/finetune repos with grand
-names and no benchmarks; on this box they have consistently turned out to be
-dense re-packagings that measured badly.
+claims you could not verify.
+
+**Always report the exact upstream identity**, not a shortened nickname: the
+GGUF repo (`publisher/repo-name`), the base model it quantises, and the GGUF's
+own `general.name` when it differs from the repo name. Local filenames on the
+box are abbreviated and do not correlate to anything - `router.ini` carries the
+alias-to-repo table, and your reports have to be joinable to it.
+
+## Community fine-tune variants - the thing this agent used to miss
+
+This section exists because the earlier version of this file said to be
+skeptical of "merge/finetune repos with grand names and no benchmarks" on the
+grounds that they "have consistently turned out to be dense re-packagings that
+measured badly." **That was wrong, and it cost a find.**
+
+On 2026-08-03 `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-SFT-GPT56Sol-RL-Agent-GGUF` was
+evaluated - a repo name stacking a Qwen version that does not exist, two
+closed-model distillation claims, and an RL-agent suffix, with no benchmarks on
+the card. Every prior heuristic said discard it. Measured, it beat the
+`coder` incumbent on every axis and took the slot. The heuristic was filtering
+on presentation, which correlates with nothing.
+
+So: **a bad repo name is not evidence.** Judge these repos on the artifact.
+
+- **Search the derivative space deliberately, not just lab releases.** For any
+  strong base model in the lineup's size class, list what has been built on top
+  of it: `https://huggingface.co/api/models?search=<base-name>&sort=downloads`
+  and `?sort=lastModified`, plus `filter=base_model:<org>/<model>` where the
+  tag exists. Download count is the one cheap signal that some third party got
+  it working - the model above had 12k.
+- **Verify the artifact, not the card.** Pull the file list and byte sizes via
+  the tree API. If a `manifest.json` or `SHA256SUMS` is published, check the
+  quant tiers are internally consistent. A repo whose advertised tiers do not
+  match its actual files is the real red flag - grand naming is not.
+- **Read the GGUF metadata before believing the arch.** The model above
+  declares `general.architecture = qwen3next` while actually being the
+  `qwen35moe`-family Qwen3.6-35B-A3B; both official conversions of the same base
+  tag it `qwen35moe`. Those two paths use different QKV/SSM broadcast
+  conventions in this tree, so the mismatch was a legitimate reason to distrust
+  it - and it still ran correctly. **Flag an arch-tag mismatch as a reason to
+  test rather than a reason to reject**, and say which way the throughput
+  actually tracks once measured.
+- **Take the card's negative claims seriously.** That model's card says plainly
+  not to pass `--model-draft`; there is no MTP head and no drafter. That is a
+  ~32% generation handicap against `fast` and it is the single most important
+  line on the page. Fine-tunes frequently inherit a base's MTP tensors without
+  the wiring, or ship a sidecar that cannot load - check the tensor list.
+- **The upside these carry is reasoning economy.** The same model matched
+  `fast` on `reason-eval-hard` (9/10, 1 truncated, both) in 540 s against 776 s
+  while emitting 28,007 chars of reasoning against 72,108 - 2.6x less thinking,
+  which is the axis this box weights highest. RL-tuned agentic fine-tunes are
+  the most likely place to find that, and published benchmarks never report it.
+
+What still holds: **merges** (DARE-TIES and similar) carry non-termination risk
+regardless of their claims - Ornith-3.6 was a merge and failed exactly that way.
+Distinguish a merge from a fine-tune before applying that prior, and never
+extend it to fine-tunes on the strength of the repo name alone.
 
 ## Report format
 
