@@ -262,7 +262,10 @@ bandwidth profile to the incumbent.
 
 ---
 
-## Measured and rejected (the only two candidates ever tested on this box)
+## Measured on this box
+
+Three candidates have ever been benchmarked here rather than researched. The
+first two were rejected; the third is the first to survive measurement.
 
 ### Ornith-Agents-A1-3.6-35B-A3B — rejected 2026-08-01, tested for `fast`
 
@@ -313,6 +316,157 @@ before any throughput tuning; a `spec-draft-n-max` sweep on a model that cannot
 terminate is wasted time, which is exactly what rejected these two before it
 was wasted. The incumbents are not immune either — `fast` truncates on 2 of the
 10 hard items. The bar is the incumbent for that slot, not perfection.
+
+### nerkyor Qwen3.6-35B-A3B-DSV4Pro RL-Agent Q4 — measured 2026-08-03, not rejected
+
+`nerkyor/Qwen3.6-35B-A3B-DSV4Pro-SFT-GPT56Sol-RL-Agent-GGUF`, Q4 tier, 19.06
+GiB. A community fine-tune of Qwen3.6-35B-A3B whose repo name stacks enough
+unverifiable claims (a Qwen version that does not exist, two closed-model
+distillation claims, an RL-agent suffix) that it was expected to be a mislabeled
+reupload. **It is not.** The repo is real (12,356 downloads, four consistent
+quant tiers at 13.30 / 19.06 / 27.60 / 34.37 GiB plus an optional vision
+projector, cross-verified against `manifest.json` and `SHA256SUMS`), and the
+weights are a genuine 256-expert top-8, 40-block, GDN-hybrid MoE — confirmed by
+parsing the raw GGUF binary header, not by trusting the HF summary.
+
+**Verdict: beats `coder` on every measured axis, sits behind `fast` on
+generation speed, ties it everywhere else.** Same build (`3d08405`, build 268),
+idle box, Vulkan confirmed, `bench-guard.sh` clean (35-81°C, 4-51 W).
+
+| condition | pp d0/4k/16k | tg d0/16k/32k | served pp/tg | code-eval | reason-eval |
+|---|---|---|---|---|---|
+| **nerkyor Q4** | 325.97 / 316.95 / 296.16 | 26.41 / 24.05 / 21.96 | 319.7 / 26.14 | **4/4**, 104 s, 19 turns, 0/0, 3,597c | **8/8**, 107 s, 9,611c |
+| `fast` (re-measured same session) | 332.60 / 263.18 / 285.52 | 25.33 / 23.06 / 21.15 (base) | 317 / **34.6** (MTP) | 4/4, 93 s, 19 turns, 0/0, 4,342c | 8/8, 190 s |
+| `coder` (baseline table) | 228.9 (d0) | 18.6 (d0) | 235 / 25 (DFlash) | 2/4, 162 s, 36 turns, STALL | n/a |
+
+On base throughput it is a dead heat with `fast` (within a few percent in both
+directions, ordinary run-to-run variance) and roughly +40% on `coder` for both
+pp and tg. Its **non-speculative** served tg of 26.14 edges out `coder`'s
+**speculative** served tg of 25 — with no drafter at all.
+
+**Where it loses, and why the gap cannot be closed:** `fast`'s in-model MTP head
+puts it at 34.6 t/s served, a 32% generation lead. This candidate's model card
+explicitly states no MTP sidecar exists ("Do not add `--model-draft`"), so there
+is no speculation path to recover it.
+
+**What the passing scores do and do not prove.** Both `code-eval.sh` and
+`reason-eval.sh` saturate at the incumbent's score, so 4/4 and 8/8 here
+demonstrate *not worse*, not *better* — the same limitation recorded above for
+the easy tiers generally. `code-eval-hard.sh` was written on 2026-08-03
+specifically to close this gap for the coder slot, the way `reason-eval-hard.sh`
+closed it for `deep`.
+
+**One anomaly, recorded because it was a legitimate reason to distrust the
+file.** The GGUF's `general.architecture` reads `qwen3next`, while both official
+conversions of the same base model (`ggml-org/Qwen3.6-35B-A3B-GGUF`,
+`unsloth/Qwen3.6-35B-A3B-GGUF`) tag it `qwen35moe` — and this file's own
+metadata carries a reference byte-size field matching the `ggml-org` qwen35moe
+repo exactly, confirming same base model with a mismatched arch tag.
+`llama-model.cpp` documents genuinely different QKV/SSM broadcast conventions
+between those two paths, so this was not a nitpick. It was tested rather than
+rejected on that basis: `check-output.sh`, `code-eval.sh` and `reason-eval.sh`
+all pass cleanly, and throughput tracks the `qwen35moe` (`fast`) shape rather
+than `coder`'s slower `qwen3next` shape — so it behaves correctly despite the
+label. **Residual risk is not fully closed**: testing reached 32768 depth only,
+and vision and long-running serving were not exercised.
+
+**Superseded — it took the `coder` alias on 2026-08-03.** The recommendation
+below was written before the hard tiers ran; see "Hard-tier results" immediately
+after this section for what changed and why the swap was made.
+
+~~Standing recommendation: do not wire it into `router.ini` on this evidence.~~
+It is not a case for replacing `fast` — parity on the saturating evals, 32%
+behind on generation, no speculation available. It *is* a stronger `coder`-slot
+candidate than anything the 2026-08-03 sweeps found: smaller (19 vs 46 GiB),
+faster on every measured axis, and it passes the agentic-coding eval where
+`coder` stalls.
+
+The Q4 file is on the box at `/root/models/nerkyor-dsv4pro-q4.gguf` (20.47 GB,
+SHA256-verified; 201 GiB free).
+
+### Hard-tier results — measured 2026-08-03, and the `coder` swap
+
+All three hard tiers, both models, same session and build. `fast` ran through
+the router; the candidate ran standalone on port 8081 at `c=32768` with the
+router stopped so it had the pool to itself.
+
+| eval | `fast` | candidate |
+|---|---|---|
+| `reason-eval-hard.sh` | 9/10, 1 trunc, 776 s, 72,108c | 9/10, 1 trunc, **540 s, 28,007c** |
+| `code-eval-hard.sh` | 6/6, **163 s**, 27 turns | 6/6, 244 s, 31 turns |
+| `code-eval-opencode.sh` | 6/7, **200 s**, 43 turns, 3.7K read | 6/7, 275 s, 42 turns, 3.8K read |
+
+**No tier separated the two models on score.** They tie on all three, and on the
+opencode tier they fail the *same* item. Three things follow, in order of how
+much they matter.
+
+**1. The candidate wins decisively on reasoning economy.** Same score and same
+truncation count on the hard reasoning tier, reached 30% faster while emitting
+**2.6x less reasoning** — despite having no MTP head and generating at ~26 t/s
+against `fast`'s 34.6. This repo has weighted that axis above raw t/s since the
+`deep` sweep ("a model that thinks in half the tokens is worth more than one
+that generates 20% faster"); this is the first local measurement where a
+candidate wins on it. The matching truncation count is also direct evidence
+against the non-termination mode that rejected Ornith-3.6 and MiniMax-M2.1 —
+the open question from the throughput run above, now answered.
+
+**2. `code-eval-hard.sh` is saturated and failed at its job.** It was written to
+rank a candidate above `fast`; two models scored 6/6 on the first attempt. It
+remains a regression check — a harder workload than the easy tier (27 turns and
+163 s against 19 and 93 s) without being a harder discriminator. Its dup-block
+item, built specifically to force edit misses, produced **0 for both models**:
+each qualified its `old_str` with surrounding context on the first try. The
+opencode-critical metric is still untested on this box.
+
+**3. `code-eval-opencode.sh` was the only tier to produce a failure**, and both
+models failed identically on `agents-md` — correct fix, every assertion passing,
+a bare exception instead of the `ConfigError` that AGENTS.md mandates, at 5-6
+turns and ~0.5K read. That is not enough reading to have opened AGENTS.md at
+all.
+
+That prompted an A/B, since opencode injects AGENTS.md *contents* into the
+system prompt while the item only said the file existed. `agents-inject` is
+byte-identical apart from the injection:
+
+| model | `agents-md` (must discover) | `agents-inject` (handed over) |
+|---|---|---|
+| `fast` | VIOLATE, 6 turns, 0.6K | **PASS**, 5 turns, 0.5K |
+| candidate | VIOLATE, 5 turns, 0.4K | **PASS**, 4 turns, 0.5K |
+
+Unambiguous and identical for both: **neither model goes looking for project
+conventions, and both follow them once handed over.** The failure is discovery,
+not compliance — and since opencode does the handing over, real exposure in the
+client is low. Read alone, the un-injected item would have overstated the
+problem. Both items are kept: `agents-inject` is the opencode-faithful score,
+`agents-md` is the control that makes it interpretable.
+
+What the opencode tier established that tiers 1-2 structurally could not:
+`stale-edit` passed for both with 1 harness-induced miss and 0 real misses, so
+both re-read a file that changed under them and adapted rather than blindly
+retrying — the opencode-critical behaviour, now measured rather than assumed.
+`needle` passed on ~0.4K of reads against ~5.3K to brute-read the 32-file
+project, so both grep rather than reading everything.
+
+**One correction to the record.** `fast` on `reason-eval-hard.sh` scored 9/10 in
+776 s on 72,108 chars this session, against the 8/10 / 999 s / 95,650 chars
+recorded in the `deep` section above. Same build. The recorded figure is a
+single sample and this tier is noisier than the 10/10-vs-8/10 framing implies;
+treat single-sample hard-tier numbers as indicative, not settled.
+
+**Decision: the candidate took the `coder` alias on 2026-08-03.** The case is
+not that it beats `fast` — it does not, and it is 32% behind on generation with
+no speculation path. The case is that it beats what `coder` was: pp 326 vs 229,
+tg 26.4 vs 18.6 base, served 26.14 (no speculation) vs 25 (with DFlash),
+`code-eval` 4/4 in 104 s against 2/4 in 162 s with a stall, and 19 GiB against
+46. Qwen3-Coder-Next had also stopped loading entirely (repeatable DeviceLost),
+so the alias was unusable as it stood. Retired weights stay on disk at
+`/root/models/Qwen3-Coder-Next-*.gguf`.
+
+**Still open, and worth closing before trusting the slot broadly:** it has only
+been exercised to 32768 context here while `router.ini` sets 131072; the
+`qwen3next`/`qwen35moe` arch-tag mismatch is understood but not fully closed
+out; and it carries no vision, where the retired model carried none either but
+`fast` and `assist` both do.
 
 ---
 
@@ -738,3 +892,107 @@ confirmed against actual GGUF metadata — moot given the size rejection.
 **Not found at all:** independent (non-vendor) corroboration of GLM-4.7's 73.8;
 any Terminal-Bench 2.0 figure for MiniMax-M3, Kimi K2.6, or DeepSeek-V4-Flash;
 any depth-scaling data for MiniMax-M3's MSA mechanism.
+
+---
+
+# ModelScope sweep for `assist` and `coder` — 2026-08-03 (third pass)
+
+Researched 2026-08-03 against a different **source** rather than a different
+brief: sweep Alibaba's ModelScope hub for anything the HF-centric sweeps above
+would have missed. ModelScope carries Chinese-lab releases (Qwen, GLM,
+Ling/Bailing, MiniMax, StepFun, InternLM, Skywork, Moonshot, Baichuan, Yi)
+sometimes earlier than HF, sometimes exclusively, occasionally with first-party
+GGUFs. Gates carried forward unchanged from the sweeps above.
+
+**Headline: nothing on ModelScope beats `assist` or `coder`.** Nothing reached
+the state of "clears quality, fits pool at >=3 bpw, supported arch" — every
+candidate failed an architecture or packaging gate first, so no per-candidate
+deep-dive section follows. The nearest thing, InternVL3.5-30B-A3B, is
+architecturally *identical* to `assist`'s text backbone, so there is no
+arithmetic case to make even before touching benchmarks.
+
+**Read this sweep's sourcing caveat before trusting a size.** Both
+`modelscope.ai` and `modelscope.cn` are JS-rendered SPAs that `WebFetch` cannot
+execute, and the file-tree API paths tried all 404'd. **No byte size in this
+section was read from ModelScope itself** — sizes come from HF mirrors of the
+same releases. That is the usual corroboration path for these repos and no
+candidate here got far enough to need a size, but a future ModelScope sweep
+that reaches the pool-arithmetic stage will need a different fetch method
+(rendered browser or the official SDK), not `WebFetch`.
+
+On the URL the sweep was asked about: `modelscope.ai` serves the same
+repo/model-card content as `modelscope.cn` under an English-first URL, and
+third-party coverage describes it as the same Alibaba/DAMO MaaS platform. **No
+redirect was observed** — the fetch tool never reported one, which is weak
+evidence against a redirect rather than proof of one. Treat the two as the same
+catalog.
+
+## Priority order — all rejects
+
+| model | arch | total/active | quant+size+bpw | experts | full-attn layers | MTP/drafter | est. tg | verdict |
+|---|---|---|---|---|---|---|---|---|
+| GLM-4.6V (full) | `glm4v`-projected MoE | 106B/12B | not sized (rejected before quant search) | 128 | full attn, no hybrid | none found | **~6-9 (est., formula only)** | reject — 12B active fails the ceiling check against a slot already running 36 t/s on 3B active |
+| GLM-4.6V-Flash | dense VLM | 9B **dense** | Q4_K_M ~5-6 GiB (HF mirror) | n/a | dense | none | dense-rule | reject — dense, well over the sub-4B routine exception |
+| InternVL3.5-30B-A3B | Qwen3MoE backbone + InternViT | 30.5B/3.3B | **no GGUF found** | 128 top-8 | 48 of 48 | none found | ~parity with `assist` (est., from arch identity) | reject — identical active/expert config to the incumbent, so no throughput case exists either way; benchmark parity only; no GGUF+mmproj packaging |
+| Ming-flash-omni-2.0 | `bailingmoe2` + omni towers | 100B/6.1B | no GGUF/mmproj found | — | full attn, 32 layers | tensors present, **not wired** | n/a | reject — no vision/audio tower support in this tree; text-backbone MTP is inert here |
+| Ling-flash-2.0 / Ling-mini-2.0 | `bailingmoe2` | 100B/6.1B, 16B/1B | GGUFs exist | 1:32 activation | **all layers full attention** | tensors present, not wired | unmeasured | unchanged reject — superseded, no fresh agentic evidence; full attention everywhere raises the MiniMax-M2.1 depth concern |
+| Skywork-R1V3-38B | dense (InternViT-6B + R1-Distill-Qwen-32B) | 38B **dense** | GGUF exists | n/a | dense | none | dense-rule | reject — dense, far over the sub-4B exception |
+| MiniMax-M2.5 / M2.7 coder variants | `minimax-m2` | 229B/10B | large | 256 top-8 | **62 of 62** | DFlash published | n/a | unchanged reject — measured 65% depth collapse on M2.1 is architectural; no TB 2.0 figure found for any point release |
+| Qwen3.6-Coder / 3.7-Coder / 3.6-VL / 3.7-VL | — | — | — | — | — | — | — | **do not exist** as of 2026-08-03 — searched specifically |
+
+## One correction to the record, and it is not a new candidate
+
+`bailingmoe2` (Ling-flash-2.0 / Ling-mini-2.0) is **natively implemented** in
+this tree, not merely enum-registered: `src/models/bailingmoe2.cpp` builds
+standard multi-head attention with RoPE + QK-norm on every layer and a standard
+`build_moe_ffn` MoE with a shared expert — no exotic ops, no vendor fork needed.
+This confirms rather than changes the 2026-08-02 entry ("Arch supported,
+superseded, no fresh agentic evidence").
+
+Two details worth keeping:
+
+- **Its NextN/MTP tensors are loaded but explicitly not wired into the graph**
+  (stated in a comment in that file). So a Ling GGUF advertising MTP would get
+  no speculation benefit here — the same declared-but-unusable shape that killed
+  GLM-4.7-Flash, differing only in that it fails silently rather than erroring.
+- **Ling-flash-2.0 is full attention on every layer**, correcting a possible
+  conflation with the `BailingMoeV2.5` hybrid in Ling-2.6-flash. That puts it in
+  the MiniMax-M2.1 depth-collapse category, not the cheap-KV category.
+
+Ling-2.6-flash still needs a vendor fork (`BailingMoeV2.5` is a distinct hybrid
+variant from the plain `bailingmoe2` now in-tree) — unchanged.
+
+## Rejected at research time, with reasons
+
+| model | reason |
+|---|---|
+| GLM-4.6V (106B/12B) | 12B active fails the ceiling check for a vision slot already served at 36 t/s on 3.3B active — same failure mode as GLM-4.5-Air's rejection for `coder`. |
+| GLM-4.6V-Flash (9B) | Dense, over the sub-4B exception. Also carried a **Vulkan-specific mmproj incoherence bug** (ggml-org/llama.cpp #18164, `--no-mmproj-offload` workaround, fixed in PR #18180). Moot given the dense rejection, but recorded because it is exactly the class of Vulkan-specific breakage this box has to watch for in any vision candidate. |
+| InternVL3.5-30B-A3B | Same Qwen3-30B-A3B text backbone as `assist` (48 layers, 128 experts top-8, 3.3B active) — no throughput advantage is architecturally possible. MVBench 72.1 vs 71.6 is parity, not an upgrade. No GGUF or mmproj packaging found at all. `tools/mtmd/internvl.cpp` does exist, so the vision tower family is supported generically — untested against this model's specific config. |
+| Ming-flash-omni-2.0 | Same `bailingmoe2` base as Ling-flash-2.0; its vision/audio/image-gen towers have no mmproj support found in this tree. |
+| Ling-flash-2.0 / Ling-mini-2.0 | Unchanged from 2026-08-02 — see the correction above. |
+| Ling-2.6-flash | Still needs a vendor fork (`BailingMoeV2.5`). Unchanged. |
+| Skywork-R1V3-38B | Dense. Over the sub-4B exception. |
+| MiniMax-M2.5 / M2.7 | 62 of 62 full attention; newer DFlash drafters do not touch the architectural cause of the measured collapse. Unchanged. |
+| Qwen3.6-Coder / 3.7-Coder / 3.6-VL / 3.7-VL | None exist. Qwen3.7 shipped as closed `Plus`/`Max` plus `Qwen3.6-35B-A3B` / `Qwen3.6-27B`, both already covered and rejected above. No coder- or vision-specific MoE point release. |
+| Skywork-VL, Baichuan-VL, Yi-VL | No 2026 MoE releases found. Yi-VL-34B-GGUF is a stale 2024 dense model; Skywork's vision line (R1V3) is dense. |
+
+## What was verified vs. inferred
+
+**Verified:** `LLM_ARCH_BAILINGMOE2` registered at `src/llama-arch.cpp:107`
+**and** fully implemented in `src/models/bailingmoe2.cpp` — read directly, not
+inferred from the enum — including the comment stating NextN/MTP tensors are
+loaded but unused. `tools/mtmd/internvl.cpp` present, confirming generic
+InternVL vision-tower support. The GLM-4.6V-Flash Vulkan mmproj bug and its fix
+(#18164 / PR #18180) via direct GitHub fetch.
+
+**Inferred, not measured:** InternVL3.5-30B-A3B's throughput parity with
+`assist` (architectural identity of the text backbone, no benchmark run);
+GLM-4.6V's ~6-9 t/s (ceiling formula only, no measured anchor for this model on
+this box).
+
+**Not found at all:** any GGUF for InternVL3.5-30B-A3B; any working
+GGUF+mmproj pairing for Ming-flash-omni-2.0's non-text modalities; a
+Terminal-Bench 2.0 or Aider-polyglot figure for any MiniMax-M2.x point release,
+for GLM-4.6V, or for Ling-flash-2.0 / Ling-2.6-flash; **any file-tree byte size
+from ModelScope itself**, for the SPA reason given above.
