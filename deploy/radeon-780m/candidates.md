@@ -282,7 +282,7 @@ row is linked in the "Detail" column.
 | Qwen3.6-35B-A3B vanilla (official quant) | `fast`/`deep` | downloaded 2026-07-31, desk-rejected | **rejected** | same hybrid-GDN shape as `coder` (10/40 full-attention) — no reason to expect better prefill than the fine-tunes already covering this base | deleted 2026-08-03 |
 | `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-SFT-GPT56Sol-RL-Agent-GGUF` (Q4, 19.06 GiB) | `coder` | 2026-08-03 | **deployed** | beats Coder-Next on every axis, ties `fast` on saturating evals; see "Hard-tier results" below | on disk (`nerkyor-dsv4pro-q4.gguf`) |
 | `nerkyor/Qwen3.6-35B-A3B-APEX-MTP-GGUF` ("I-Balanced", 24.27 GiB) | `fast` (MTP comparison) | 2026-08-04 | **rejected** | class-leading throughput once retuned to n-max=3 (35.6 t/s served, beats `fast`) but hard-reasoning 6/10 with 4 truncations — same non-termination failure that sank Ornith-3.6 and MiniMax-M2.1 | deleted 2026-08-04 |
-| `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill` (Q4_K_M, 20.22 GiB + mmproj) | `fast` | 2026-08-04 | **recommended — swap `fast`** | beats `fast` on base+served throughput (tuned n-max=4: ~39-41 t/s vs 34.6), wins hard-reasoning decisively (10/10 zero-trunc vs 8-9/10), vision+tools confirmed, no depth collapse to d65536, smaller than `fast`. Not yet wired into `router.ini` — awaiting user go-ahead | on disk (`nerkyor-thinking-distill-q4.gguf` + `-mmproj-F16.gguf`) |
+| `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill` (Q4_K_M, 20.22 GiB + mmproj) | `fast` | 2026-08-04 | **rejected — production instability** | won every standalone eval (throughput, hard-reasoning, vision, tools) and briefly held the `fast` alias, but hit two `ErrorDeviceLost` GPU hangs under real opencode traffic within 3 hours live, never reproduced standalone; reverted to Ornith same day. See "GPU hang incident" below | on disk (`nerkyor-thinking-distill-q4.gguf` + `-mmproj-F16.gguf`) |
 | `nerkyor/Qwen3.6-27B-DSV4Pro-GLM52-SFT-GPT55-RL-Coding-GGUF` (Q4-LynnStyle, dense) | `coder` | 2026-08-04 | **rejected** | confirmed dense (`qwen35`, zero expert tensors) — 4.1 t/s base, 8.5 t/s even with its own MTP draft sidecar; reproduces this repo's established dense-model rejection a third time | deleted 2026-08-04 |
 
 ### Ornith-Agents-A1-3.6-35B-A3B — rejected 2026-08-01, tested for `fast`
@@ -636,7 +636,8 @@ discriminate once the easy tiers saturate. Vision and tools tie (both work).
 10-vs-8-out-of-10 hard-reasoning result. Smaller footprint too (20.22 vs 21.9
 GiB).
 
-**Proposed `router.ini` change, not yet applied:**
+**`router.ini` change applied 2026-08-04 09:48, reverted the same day at ~13:00**
+after the incident below:
 ```
 model             = /root/models/nerkyor-thinking-distill-q4.gguf
 mmproj            = /root/models/nerkyor-thinking-distill-mmproj-F16.gguf
@@ -645,6 +646,62 @@ spec-draft-n-max  = 4
 ; spec-draft-p-min left at default — no benefit found, unlike fast's 0.3
 ctx-size          = 131072
 ```
+
+#### GPU hang incident — 2026-08-04, `fast` reverted to Ornith after ~3 hours live
+
+The swap above went live at 09:51:30 (service restart after the commit). Real
+usage was via OpenCode against the deployed alias, not the eval scripts.
+Two crashes followed, both the same signature and both self-healing at the
+kernel level:
+
+```
+radv/amdgpu: The CS has been cancelled because the context is lost. This context is innocent.
+E srv  update_slots: decode() failed: vk::Queue::submit: ErrorDeviceLost
+```
+
+Host dmesg, same two moments:
+```
+amdgpu 0000:c4:00.0: ring comp_1.1.0 timeout, signaled seq=..., emitted seq=...
+amdgpu 0000:c4:00.0: Starting comp_1.1.0 ring reset
+amdgpu 0000:c4:00.0: reset compute queue (1:1:0)
+amdgpu 0000:c4:00.0: Ring comp_1.1.0 reset succeeded
+amdgpu 0000:c4:00.0: [drm] device wedged, but recovered through reset
+```
+
+| time | in-flight request | outcome |
+|---|---|---|
+| 12:28:02 | ~2,048 tokens into prompt processing (small request, on an instance already running cleanly for ~30 min) | request failed, ring reset, service auto-reloaded the model |
+| 12:35:26 | 67,160 tokens into prompt processing (large request, on the freshly reloaded instance) | request failed, ring reset, service stayed up |
+
+Ruled out rather than assumed:
+
+| checked | result |
+|---|---|
+| context-length trigger | no — crashed at both ~2k and 67k tokens |
+| D-state / stuck process (the known GTT-exhaustion failure mode) | no — `ps aux` clean both times |
+| silent CPU fallback | no — `/v1/models` showed `fast` still `loaded`, GTT/VRAM at normal levels (10.6/17 GiB) afterward |
+| thermal/pre-existing driver flakiness | no — host dmesg shows **zero** `amdgpu` ring timeouts across the ~44 h of uptime before this swap; two in the first 3 h after it |
+| load-time/teardown race (the previously documented `DeviceLost` mode) | no — that mode shows the GPU idle at 0% with a clean allocator failure; both of these hit mid-decode with the GPU actively computing |
+
+This is a fourth, previously undocumented `DeviceLost` signature on this box
+(see the other two in "Watch for silent CPU fallback" and "A second failure
+mode: DeviceLost on spec-model load" above) — a genuine `amdgpu` compute-ring
+hang under active load, not an allocator or teardown issue. It self-heals at
+the ring level (no D-state stranding, no CPU fallback this time) but kills
+whatever request was in flight, which is a real problem for an agentic client
+that can't tell the difference between "the model refused" and "the GPU ate
+the request."
+
+Root cause not confirmed. The standalone evals (including the full-ctx
+depth sweep above) never exercised opencode's actual traffic shape, so the
+trigger could be something opencode does specifically, or something about
+this model's own MTP draft head under sustained real-world load that
+`llama-bench`/`probe-server.sh` don't reproduce. Ornith held the `fast` alias
+for days across this repo's entire measurement history with no such hang, so
+**reverted `fast` to Ornith** (`router.ini`, `opencode.json`) as the immediate
+fix; Thinking-Distill's weights are kept on disk for further isolation
+(disable MTP spec-decode, or drop mmproj, to narrow the trigger) before any
+second attempt at this alias.
 
 #### nerkyor/Qwen3.6-27B-DSV4Pro-GLM52-SFT-GPT55-RL-Coding-GGUF — rejected 2026-08-04, tested for `coder`
 
