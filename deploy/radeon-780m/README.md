@@ -630,7 +630,7 @@ still benchmarks at full speed, it just emits garbage.
 
 | Slot | Model | Why |
 |---|---|---|
-| `fast` | Ornith-1.0-35B MTP-APEX + mmproj | all-rounder: reasoning, vision and tools in 21.9 GiB |
+| `fast` | nerkyor Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill + mmproj | all-rounder: reasoning, vision and tools in 20.22 GiB; see `candidates.md` for the swap + GPU-hang-fix history |
 | `assist` | Qwen3-VL-30B-A3B-Instruct UD-Q4_K_XL + mmproj | only alias with vision; 32 t/s, 256K ctx |
 | `coder` | Qwen3-Coder-Next UD-Q4_K_XL + DFlash drafter | SWE-bench Verified 70.6 at 3B active; best agentic quality that fits |
 
@@ -688,7 +688,7 @@ Measured on this hardware, generation with a 2.4k-token prompt:
 
 | alias | pp | tg | vision | tools | reasoning |
 |---|---|---|---|---|---|
-| `fast` | 317 t/s | 34.6 t/s | yes | yes | yes, 8/8 in 190 s |
+| `fast` | ~343 t/s | ~39-41 t/s | yes | yes | yes, 10/10 in 154 s (hard tier) |
 | `assist` | 394 t/s | 32 t/s | yes | yes | no |
 | `coder` | 235 t/s | 25 t/s | no | yes | no |
 | `deep` | 242 t/s | 19.6 t/s | no | yes | yes, 8/8 in 279 s |

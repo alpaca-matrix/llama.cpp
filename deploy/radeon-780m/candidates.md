@@ -282,7 +282,7 @@ row is linked in the "Detail" column.
 | Qwen3.6-35B-A3B vanilla (official quant) | `fast`/`deep` | downloaded 2026-07-31, desk-rejected | **rejected** | same hybrid-GDN shape as `coder` (10/40 full-attention) — no reason to expect better prefill than the fine-tunes already covering this base | deleted 2026-08-03 |
 | `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-SFT-GPT56Sol-RL-Agent-GGUF` (Q4, 19.06 GiB) | `coder` | 2026-08-03 | **deployed** | beats Coder-Next on every axis, ties `fast` on saturating evals; see "Hard-tier results" below | on disk (`nerkyor-dsv4pro-q4.gguf`) |
 | `nerkyor/Qwen3.6-35B-A3B-APEX-MTP-GGUF` ("I-Balanced", 24.27 GiB) | `fast` (MTP comparison) | 2026-08-04 | **rejected** | class-leading throughput once retuned to n-max=3 (35.6 t/s served, beats `fast`) but hard-reasoning 6/10 with 4 truncations — same non-termination failure that sank Ornith-3.6 and MiniMax-M2.1 | deleted 2026-08-04 |
-| `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill` (Q4_K_M, 20.22 GiB + mmproj) | `fast` | 2026-08-04 | **rejected — production instability** | won every standalone eval (throughput, hard-reasoning, vision, tools) and briefly held the `fast` alias, but hit two `ErrorDeviceLost` GPU hangs under real opencode traffic within 3 hours live, never reproduced standalone; reverted to Ornith same day. See "GPU hang incident" below | on disk (`nerkyor-thinking-distill-q4.gguf` + `-mmproj-F16.gguf`) |
+| `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill` (Q4_K_M, 20.22 GiB + mmproj) | `fast` | 2026-08-04 | **deployed (fixed)** | won every standalone eval, but the first deploy hit two `ErrorDeviceLost` GPU hangs under real opencode traffic within 3 hours live; root-caused to missing `spec-draft-type-k/v` (defaulted to F16), fixed by setting it to `q8_0` (matching Ornith), verified clean across a ~20 min standalone soak, redeployed same day. See "GPU hang incident" below | on disk (`nerkyor-thinking-distill-q4.gguf` + `-mmproj-F16.gguf`) |
 | `nerkyor/Qwen3.6-27B-DSV4Pro-GLM52-SFT-GPT55-RL-Coding-GGUF` (Q4-LynnStyle, dense) | `coder` | 2026-08-04 | **rejected** | confirmed dense (`qwen35`, zero expert tensors) — 4.1 t/s base, 8.5 t/s even with its own MTP draft sidecar; reproduces this repo's established dense-model rejection a third time | deleted 2026-08-04 |
 
 ### Ornith-Agents-A1-3.6-35B-A3B — rejected 2026-08-01, tested for `fast`
@@ -692,16 +692,66 @@ whatever request was in flight, which is a real problem for an agentic client
 that can't tell the difference between "the model refused" and "the GPU ate
 the request."
 
-Root cause not confirmed. The standalone evals (including the full-ctx
-depth sweep above) never exercised opencode's actual traffic shape, so the
-trigger could be something opencode does specifically, or something about
-this model's own MTP draft head under sustained real-world load that
+Root cause not confirmed at the time. The standalone evals (including the
+full-ctx depth sweep above) never exercised opencode's actual traffic shape,
+so the trigger could be something opencode does specifically, or something
+about this model's own MTP draft head under sustained real-world load that
 `llama-bench`/`probe-server.sh` don't reproduce. Ornith held the `fast` alias
 for days across this repo's entire measurement history with no such hang, so
 **reverted `fast` to Ornith** (`router.ini`, `opencode.json`) as the immediate
-fix; Thinking-Distill's weights are kept on disk for further isolation
-(disable MTP spec-decode, or drop mmproj, to narrow the trigger) before any
-second attempt at this alias.
+fix; Thinking-Distill's weights were kept on disk for further isolation.
+
+##### Root cause and fix — same day, 2026-08-04
+
+Reading `common/speculative.cpp`'s MTP implementation
+(`common_speculative_impl_draft_mtp::process()`, around line 1402) shows the
+draft context is not idle outside generation: on every prefill ubatch it runs
+its own full `llama_decode()` catch-up over that batch, to keep the draft
+model's KV cache in lockstep with the target's. That decode's bandwidth cost
+is set by `--spec-draft-type-k/v`, which defaults to **F16**
+(`common/common.h:340-341`) unless overridden - and since the draft context's
+KV holds the whole accumulated conversation, that cost scales with total
+context, not just the current request.
+
+Ornith's `[fast]` stanza has always set `spec-draft-type-k/v = q8_0`
+explicitly (halves that bandwidth - see the FAST comment block above). The
+first Thinking-Distill deploy did not: the entry earlier in this table notes
+it was "deliberately omitted here rather than carried over untested." Combined
+with `n-max=4` (one more draft round per verify cycle than Ornith's 3), the
+deployed config was running roughly double the draft-KV bandwidth of Ornith's
+proven-stable config, scaling with the accumulated context - consistent with
+both incidents (one on a session already ~30 min / a few thousand tokens
+warm, one at 67k accumulated tokens).
+
+**Fix applied:** added `spec-draft-type-k = q8_0` / `spec-draft-type-v = q8_0`
+to the `[fast]` stanza, keeping `n-max=4` (no evidence pointed at `n-max`
+itself, and dropping it would give up most of the throughput win for no
+established reason).
+
+**Verification, standalone port 8081, production `fast`/Ornith untouched
+throughout:** ~20 minutes of active request traffic (two phases, 15:15-15:29
+and 15:29-15:36) against the fixed config, crossing both incident depths -
+small ~2k-token requests on an already-warm instance, and single-conversation
+depth past 67k (reaching 102k tokens) - with concurrent two-slot bursts
+throughout (`parallel=2`, matching production). Draft acceptance stayed
+healthy, 0.73-0.98 typically (one 0.38 outlier under two-slot contention, not
+a correctness signal). Zero `ErrorDeviceLost` in the server log; zero
+`amdgpu` ring-timeout/reset lines in a continuous host `dmesg -T -w` capture
+for the full window (`192.168.254.222`). GPU sampled live during requests at
+97-99% busy, full clock, no throttling, no D-state. Cleanup verified: GTT/VRAM
+returned to the exact pre-test production-only baseline (11.30 GiB / 15.85
+GiB), no stray processes, no repo or systemd files touched.
+
+**Confidence level - good but not proven-safe.** Twenty minutes of active
+traffic crossing the critical depths twice is meaningfully reassuring, but
+the two real incidents happened at ~30 and ~37 minutes into two *separate*
+live sessions over a 3-hour organic-traffic window - longer cumulative
+exposure and a bursty real-agent traffic shape this soak did not fully match.
+**Redeployed to production 2026-08-04** on that basis; the plan is to watch
+`journalctl -u llama-server` and host `dmesg` closely for the same signature
+under real opencode traffic rather than run a longer synthetic soak first. If
+it recurs, revert to Ornith again (`ornith35-mtp-q.gguf`, kept on disk as the
+rollback target) and treat `n-max` as the next variable to isolate.
 
 #### nerkyor/Qwen3.6-27B-DSV4Pro-GLM52-SFT-GPT55-RL-Coding-GGUF — rejected 2026-08-04, tested for `coder`
 

@@ -12,7 +12,7 @@
       },
       "models": {
         "fast": {
-          "name": "fast - SC117/Ornith-1.0-35B-MTP-APEX (35B-A3B, MTP)",
+          "name": "fast - nerkyor/Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill (35B-A3B, MTP)",
           "limit": { "context": 131072, "output": 32768 }
         },
         "coder": {
