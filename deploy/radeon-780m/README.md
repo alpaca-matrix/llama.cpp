@@ -628,9 +628,25 @@ HF API and retries. Parallel downloaders against HF's Xet CDN can produce files
 that are the correct length but byte-damaged; a damaged GGUF still loads and
 still benchmarks at full speed, it just emits garbage.
 
+`ctx-size` was raised 131072 -> 262144 2026-08-04 for `fast`/`coder`/`assist`/
+`nerkyor-eval`, matching each GGUF's own `context_length` metadata
+(`gguf_dump.py --no-tensors`, all four report 262144 natively - none of this
+was YaRN-extrapolated beyond what the model declares). `deep` stays at 131072:
+that is gpt-oss-120b's own GGUF-declared ceiling, already YaRN-extended from a
+4096 base per its `rope.scaling.*` metadata, so there is no larger native
+context to move to. Each raised alias was verified loadable standalone at the
+new ctx-size on a spare port before this went into `router.ini` - `fast`
+(with its MTP draft context, the most memory-hungry case) measured ~30.5 GiB
+GTT+VRAM alone, `assist` (full attention, no speculation) ~33 GiB, both
+comfortably inside the 76 GiB pool with `models-max = 1`. None of this has
+been exercised past 131072 in the eval scripts yet - depth-sensitive settings
+(draft acceptance, `p-min`) were tuned at shallower depths and may want
+revisiting if this box starts serving conversations that actually reach into
+the new range.
+
 | Slot | Model | Why |
 |---|---|---|
-| `fast` | nerkyor Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill + mmproj | all-rounder: reasoning, vision and tools in 20.22 GiB; see `candidates.md` for the swap + GPU-hang-fix history |
+| `fast` | Ornith-1.0-35B MTP-APEX + mmproj | all-rounder: reasoning, vision and tools in 21.9 GiB; see `candidates.md` for the Thinking-Distill swap + GPU-hang history |
 | `assist` | Qwen3-VL-30B-A3B-Instruct UD-Q4_K_XL + mmproj | only alias with vision; 32 t/s, 256K ctx |
 | `coder` | Qwen3-Coder-Next UD-Q4_K_XL + DFlash drafter | SWE-bench Verified 70.6 at 3B active; best agentic quality that fits |
 
@@ -688,10 +704,19 @@ Measured on this hardware, generation with a 2.4k-token prompt:
 
 | alias | pp | tg | vision | tools | reasoning |
 |---|---|---|---|---|---|
-| `fast` | ~343 t/s | ~39-41 t/s | yes | yes | yes, 10/10 in 154 s (hard tier) |
+| `fast` | 317 t/s | 34.6 t/s | yes | yes | yes, 8-9/10 in the hard tier (with truncations) |
 | `assist` | 394 t/s | 32 t/s | yes | yes | no |
 | `coder` | 235 t/s | 25 t/s | no | yes | no |
 | `deep` | 242 t/s | 19.6 t/s | no | yes | yes, 8/8 in 279 s |
+
+A temporary `nerkyor-eval` slot (nerkyor Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill)
+holds a `fast` candidate under evaluation: ~343 t/s / ~39-41 t/s served, and
+10/10 zero-truncation on the hard reasoning tier - ahead of `fast` on both
+axes standalone, but not yet trusted with production traffic after two
+`ErrorDeviceLost` GPU hangs surfaced only under real opencode serving. Not
+load-on-startup, not wired to any client; select it with
+`"model": "nerkyor-eval"`. See `router.ini` and `candidates.md` for the full
+incident and fix history before considering it for `fast` again.
 
 `fast` is the default choice for almost everything: it beats `coder` on every
 published SWE-bench variant while generating 38% faster in half the footprint,

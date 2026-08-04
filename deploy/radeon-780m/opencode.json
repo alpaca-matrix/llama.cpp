@@ -12,16 +12,16 @@
       },
       "models": {
         "fast": {
-          "name": "fast - nerkyor/Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill (35B-A3B, MTP)",
-          "limit": { "context": 131072, "output": 32768 }
+          "name": "fast - SC117/Ornith-1.0-35B-MTP-APEX (35B-A3B, MTP)",
+          "limit": { "context": 262144, "output": 32768 }
         },
         "coder": {
           "name": "coder - nerkyor/Qwen3.6-35B-A3B-DSV4Pro-RL-Agent (35B-A3B)",
-          "limit": { "context": 131072, "output": 32768 }
+          "limit": { "context": 262144, "output": 32768 }
         },
         "assist": {
           "name": "assist - unsloth/Qwen3-VL-30B-A3B-Instruct (vision)",
-          "limit": { "context": 131072, "output": 32768 }
+          "limit": { "context": 262144, "output": 32768 }
         },
         "deep": {
           "name": "deep - openai/gpt-oss-120b MXFP4 (117B-A5.1B)",

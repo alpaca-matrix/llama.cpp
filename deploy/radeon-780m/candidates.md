@@ -282,7 +282,7 @@ row is linked in the "Detail" column.
 | Qwen3.6-35B-A3B vanilla (official quant) | `fast`/`deep` | downloaded 2026-07-31, desk-rejected | **rejected** | same hybrid-GDN shape as `coder` (10/40 full-attention) — no reason to expect better prefill than the fine-tunes already covering this base | deleted 2026-08-03 |
 | `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-SFT-GPT56Sol-RL-Agent-GGUF` (Q4, 19.06 GiB) | `coder` | 2026-08-03 | **deployed** | beats Coder-Next on every axis, ties `fast` on saturating evals; see "Hard-tier results" below | on disk (`nerkyor-dsv4pro-q4.gguf`) |
 | `nerkyor/Qwen3.6-35B-A3B-APEX-MTP-GGUF` ("I-Balanced", 24.27 GiB) | `fast` (MTP comparison) | 2026-08-04 | **rejected** | class-leading throughput once retuned to n-max=3 (35.6 t/s served, beats `fast`) but hard-reasoning 6/10 with 4 truncations — same non-termination failure that sank Ornith-3.6 and MiniMax-M2.1 | deleted 2026-08-04 |
-| `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill` (Q4_K_M, 20.22 GiB + mmproj) | `fast` | 2026-08-04 | **deployed (fixed)** | won every standalone eval, but the first deploy hit two `ErrorDeviceLost` GPU hangs under real opencode traffic within 3 hours live; root-caused to missing `spec-draft-type-k/v` (defaulted to F16), fixed by setting it to `q8_0` (matching Ornith), verified clean across a ~20 min standalone soak, redeployed same day. See "GPU hang incident" below | on disk (`nerkyor-thinking-distill-q4.gguf` + `-mmproj-F16.gguf`) |
+| `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill` (Q4_K_M, 20.22 GiB + mmproj) | `fast` -> `nerkyor-eval` | 2026-08-04 | **eval slot, not deployed** | won every standalone eval; first deploy hit two `ErrorDeviceLost` GPU hangs under real opencode traffic within 3 hours live, root-caused to missing `spec-draft-type-k/v` (defaulted to F16) and fixed (`q8_0`, matching Ornith), but the fixed redeploy's ~20 min soak fell short of the ~30 min mark where the first incident hit, so `fast` was reverted to Ornith a second time and this now lives in the temporary `nerkyor-eval` alias pending more production confidence. See "GPU hang incident" / "Second revert" below | on disk (`nerkyor-thinking-distill-q4.gguf` + `-mmproj-F16.gguf`) |
 | `nerkyor/Qwen3.6-27B-DSV4Pro-GLM52-SFT-GPT55-RL-Coding-GGUF` (Q4-LynnStyle, dense) | `coder` | 2026-08-04 | **rejected** | confirmed dense (`qwen35`, zero expert tensors) — 4.1 t/s base, 8.5 t/s even with its own MTP draft sidecar; reproduces this repo's established dense-model rejection a third time | deleted 2026-08-04 |
 
 ### Ornith-Agents-A1-3.6-35B-A3B — rejected 2026-08-01, tested for `fast`
@@ -752,6 +752,28 @@ exposure and a bursty real-agent traffic shape this soak did not fully match.
 under real opencode traffic rather than run a longer synthetic soak first. If
 it recurs, revert to Ornith again (`ornith35-mtp-q.gguf`, kept on disk as the
 rollback target) and treat `n-max` as the next variable to isolate.
+
+##### Second revert, same day: `fast` back to Ornith, Thinking-Distill moved to a temporary eval slot
+
+The redeploy above went live on ~20 minutes of standalone soak, short of the
+~30 minute mark where the first incident hit - "good but not proven-safe" by
+its own assessment. Rather than let that redeploy accumulate its remaining
+confidence under production traffic, **`fast` was reverted to Ornith a second
+time** (`router.ini`, `opencode.json`, `README.md`) before any further
+incident occurred. This is a risk-posture decision, not a new data point: no
+additional crash was observed on the q8_0-fixed config in its brief second
+production window.
+
+Thinking-Distill's weights move to a new **`nerkyor-eval`** stanza in
+`router.ini` - same q8_0-fixed config as the redeploy above (`n-max=4`,
+`spec-draft-type-k/v=q8_0`), `load-on-startup=false`, not referenced by
+`opencode.json` or any client. It shares port 8080 with production (`models-max
+= 1` swaps it in on demand via `"model": "nerkyor-eval"`), so it is available
+for further eval-script isolation without a separate standalone router
+process, but is not a soak-test in itself - no eval traffic against it holds
+the same evidentiary weight as time live under real opencode usage. Promote it
+back to `fast` only after that gap is closed, not on standalone eval wins
+alone.
 
 #### nerkyor/Qwen3.6-27B-DSV4Pro-GLM52-SFT-GPT55-RL-Coding-GGUF — rejected 2026-08-04, tested for `coder`
 
