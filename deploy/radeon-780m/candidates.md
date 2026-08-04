@@ -264,8 +264,26 @@ bandwidth profile to the incumbent.
 
 ## Measured on this box
 
-Three candidates have ever been benchmarked here rather than researched. The
-first two were rejected; the third is the first to survive measurement.
+Registry of every model actually downloaded and run through the eval scripts
+on this hardware — check here before re-downloading or re-testing anything.
+Desk-rejected models (architecture ruled out from `config.json` alone, never
+downloaded) are in the tables above/below instead; this table is only for
+models that cost GPU time and disk space to evaluate. Full write-up for each
+row is linked in the "Detail" column.
+
+| Model / repo | Tested for | Date | Verdict | Why | Disk |
+|---|---|---|---|---|---|
+| `SC117/Ornith-1.0-35B-MTP-APEX-GGUF` | `fast` | 2026-07-31 | **deployed** | all-rounder: SWE-bench Verified 75.6, native MTP head, vision+tools+reasoning 8/8 | on disk (`ornith35-mtp-q.gguf` + mmproj) |
+| Ornith-Agents-A1-3.6-35B-A3B (DARE-TIES merge) | `fast` | 2026-08-01 | **rejected** | wins every throughput axis (+13% tg) but reason-eval 6/8, exhausts token budget without concluding on 2/8 | deleted 2026-08-03, see below |
+| MiniMax-M2.1 IQ1_S | `coder`/`deep` | 2026-08-01 | **rejected** | fits the pool but tg collapses 65% by d32768 (62/62 full-attention layers) and reasoning does not converge at 1.64 bpw | deleted 2026-08-03, see below |
+| `unsloth/Qwen3-VL-30B-A3B-Instruct-GGUF` (UD-Q4_K_XL) | `assist` | 2026-07-31 | **deployed** | only vision-capable alias besides `fast`; 394 t/s prefill lead | on disk + mmproj |
+| `gpt-oss-120b` MXFP4 (publisher unverified) | `deep` | 2026-07-31 | **deployed** | 10/10 on `reason-eval-hard.sh` in 208s vs `fast`'s 8/10 in 999s; native `reasoning_effort` | on disk |
+| `unsloth/Qwen3-Coder-Next-GGUF` (UD-Q4_K_XL) + DFlash drafter | `coder` | 2026-07-31 | **retired 2026-08-03** | beaten on every axis by nerkyor DSV4Pro (pp 229 vs 326, tg 18.6 vs 26.4 base); also started repeatably hitting DeviceLost on load | deleted 2026-08-03 |
+| Qwen3.6-35B-A3B vanilla (official quant) | `fast`/`deep` | downloaded 2026-07-31, desk-rejected | **rejected** | same hybrid-GDN shape as `coder` (10/40 full-attention) — no reason to expect better prefill than the fine-tunes already covering this base | deleted 2026-08-03 |
+| `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-SFT-GPT56Sol-RL-Agent-GGUF` (Q4, 19.06 GiB) | `coder` | 2026-08-03 | **deployed** | beats Coder-Next on every axis, ties `fast` on saturating evals; see "Hard-tier results" below | on disk (`nerkyor-dsv4pro-q4.gguf`) |
+| `nerkyor/Qwen3.6-35B-A3B-APEX-MTP-GGUF` ("I-Balanced", 24.27 GiB) | `fast` (MTP comparison) | 2026-08-04 | **rejected** | class-leading throughput once retuned to n-max=3 (35.6 t/s served, beats `fast`) but hard-reasoning 6/10 with 4 truncations — same non-termination failure that sank Ornith-3.6 and MiniMax-M2.1 | deleted 2026-08-04 |
+| `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill` (Q4_K_M, 20.22 GiB + mmproj) | `fast` | 2026-08-04 | **recommended — swap `fast`** | beats `fast` on base+served throughput (tuned n-max=4: ~39-41 t/s vs 34.6), wins hard-reasoning decisively (10/10 zero-trunc vs 8-9/10), vision+tools confirmed, no depth collapse to d65536, smaller than `fast`. Not yet wired into `router.ini` — awaiting user go-ahead | on disk (`nerkyor-thinking-distill-q4.gguf` + `-mmproj-F16.gguf`) |
+| `nerkyor/Qwen3.6-27B-DSV4Pro-GLM52-SFT-GPT55-RL-Coding-GGUF` (Q4-LynnStyle, dense) | `coder` | 2026-08-04 | **rejected** | confirmed dense (`qwen35`, zero expert tensors) — 4.1 t/s base, 8.5 t/s even with its own MTP draft sidecar; reproduces this repo's established dense-model rejection a third time | deleted 2026-08-04 |
 
 ### Ornith-Agents-A1-3.6-35B-A3B — rejected 2026-08-01, tested for `fast`
 
@@ -459,14 +477,208 @@ no speculation path. The case is that it beats what `coder` was: pp 326 vs 229,
 tg 26.4 vs 18.6 base, served 26.14 (no speculation) vs 25 (with DFlash),
 `code-eval` 4/4 in 104 s against 2/4 in 162 s with a stall, and 19 GiB against
 46. Qwen3-Coder-Next had also stopped loading entirely (repeatable DeviceLost),
-so the alias was unusable as it stood. Retired weights stay on disk at
-`/root/models/Qwen3-Coder-Next-*.gguf`.
+so the alias was unusable as it stood. Retired weights were deleted from disk
+2026-08-04 once nothing referenced them.
 
 **Still open, and worth closing before trusting the slot broadly:** it has only
 been exercised to 32768 context here while `router.ini` sets 131072; the
 `qwen3next`/`qwen35moe` arch-tag mismatch is understood but not fully closed
 out; and it carries no vision, where the retired model carried none either but
 `fast` and `assist` both do.
+
+### Three more nerkyor variants — measured 2026-08-04, following up on the DSV4Pro RL-Agent result
+
+Same publisher, same base model family, same box, same build (`3d08405`,
+build 268). Box idle and clean before every run; `bench-guard.sh` reported no
+throttling on any of the three (33-81 °C, 4-56 W); backend confirmed `Vulkan`
+on every `llama-bench` table below.
+
+#### nerkyor/Qwen3.6-35B-A3B-APEX-MTP-GGUF — rejected 2026-08-04, tested for `fast`
+
+`Qwen3.6-35B-A3B-APEX-MTP-I-Balanced.gguf`, 24.27 GiB, SHA256-verified. Only
+one quant tier exists in this repo — an adaptive-precision mix (131 Q8_0 /
+217 Q6_K / 93 Q5_K tensors, no Q4 at all). `general.architecture` reads
+`qwen35moe`, matching the known-good shape — no mislabeling this time.
+`general.name` is just `"Safetensors"`, uninformative. MTP is real, confirmed
+via raw tensor dump (`blk.40.nextn.eh_proj/enorm/hnorm/shared_head_norm`
+present) rather than trusted from the card. No mmproj shipped — no vision.
+
+The vendor's own recommended `--spec-draft-n-max 4` (tuned on a DGX Spark
+GB10, a different GPU) is poor on this box — acceptance collapses to
+0.49-0.58. Retuned to n-max=3 (`fast`'s own tuned value), acceptance jumps to
+0.90-0.96 and served tg reaches a **35.6 t/s median — beating `fast`'s 34.6**:
+
+| condition | pp d0/4k/16k | tg d0/16k/32k | served pp/tg | acceptance |
+|---|---|---|---|---|
+| `bench.sh` (no spec) | 325.45 / 349.81 / 272.59 | 24.99 / 22.45 / 20.70 | — | — |
+| served, vendor's n-max=4 | — | — | — | 0.49-0.58, len 2.97-3.31 |
+| served, n-max=3 (retuned here) | — | — | 289-300 / **35.59 median** | 0.90-0.96, len 3.7-3.86 |
+
+Evals (standalone :8081, c=32768, n-max=3):
+
+| eval | result |
+|---|---|
+| `check-output.sh` | OK, coherent |
+| `reason-eval.sh` | 8/8, 143 s, 15,720c |
+| `reason-eval-hard.sh` | **6/10, 4 truncated**, 1463 s, 143,125c reasoning |
+| `code-eval.sh` | 4/4, 118 s, 21 turns |
+| `code-eval-hard.sh` | 6/6, 193 s, 30 turns |
+| `code-eval-opencode.sh` | 7/8, 200 s, 40 turns (fails `agents-md`, same as every model tested) |
+
+**Verdict: reject.** The hard-reasoning result is disqualifying — 4 of 10
+items exhaust the token budget without concluding, and total reasoning volume
+(143k chars) is roughly double `fast`'s own worst recorded session. This is
+the same non-termination failure mode that rejected Ornith-3.6 and
+MiniMax-M2.1. Class-leading throughput cannot offset it, and it has no vision
+to fall back to a different slot. The n-max=3 retuning finding (vendor default
+is wrong for this hardware) is worth keeping regardless of the reject.
+
+#### nerkyor/Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill — measured 2026-08-04, not rejected, tested for `fast`
+
+`gguf/Qwen3.6-35B-A3B-DSV4Pro-Distill-MTP-Q4_K_M-imatrix.gguf`, 20.22 GiB,
+SHA256-verified. Proper multi-tier release (Q4_K_M/Q5_K_M/Q6_K/Q8_0/F16) plus
+an F16 mmproj (~0.84 GiB, not downloaded/tested here). `general.architecture`
+reads `qwen35moe`, matching the known-good shape. `general.name` is
+`"Distill 35b Bf16 Vllmfix"`. MTP confirmed real via the same raw tensor
+check as the others; standard Q4_K/Q6_K histogram, no adaptive-precision
+oddity.
+
+**Best base throughput of any candidate measured on this box, including the
+current `coder` incumbent:**
+
+| condition | pp d0/4k/16k | tg d0/16k/32k | served pp/tg | acceptance |
+|---|---|---|---|---|
+| `bench.sh` (no spec) | **375.24 / 347.30 / 323.09** | **28.74 / 25.85 / 23.18** | — | — |
+| served, n-max=3 (vendor default here, same as `fast`'s tuned value) | — | — | 343.1 median / 32.75 median (32.73-40.39) | 0.69-0.93, len 3.07-3.79 |
+
+Evals (standalone :8081, c=32768, n-max=3), against `fast`:
+
+| eval | result | vs `fast` |
+|---|---|---|
+| `check-output.sh` | OK, coherent | — |
+| `reason-eval.sh` | 8/8, **114 s**, 13,223c | faster (`fast` ~190 s) |
+| `reason-eval-hard.sh` | **10/10, 0 truncated**, 154 s, 15,749c | **decisively beats** `fast`'s 8-9/10 (72-95k chars reasoning) |
+| `code-eval.sh` | 4/4, **88 s**, 18 turns | faster (`fast` 93 s) |
+| `code-eval-hard.sh` | 6/6, 235 s, 33 turns | ties (`fast` 163 s/27 turns, slightly faster) |
+| `code-eval-opencode.sh` | 7/8, 225 s, 47 turns | ties (same `agents-md` failure as every model tested) |
+
+No greedy-decode looping was observed despite the model card's explicit
+warning that this thinking model wants `temperature=0.6`, not greedy — worth
+noting since this harness runs everything at `temperature=0`.
+
+**Verdict: the strongest `fast`-slot candidate found in this repo's search
+history.** Wins base throughput, wins hard reasoning outright (10/10
+zero-truncation vs 8-9/10 with truncations, in far fewer reasoning tokens),
+wins easy-tier speed, ties everything else — while being smaller (20.22 vs
+21.9 GiB) and carrying vision like `fast` does. **Not wired in yet.**
+Recommend a focused follow-up before any slot decision: exercise vision
+(`check-vision-tools.sh`), tune `spec-draft-n-max`/`p-min` the way `fast` was
+tuned (only the vendor default was tried here), and re-verify at the full
+131072 `ctx-size` (only tested to 32768 here, same open caveat as `coder`).
+
+#### Follow-up — measured 2026-08-04: vision, its own spec-tuning peak, full-ctx verify
+
+**1. Vision + tools, standalone with mmproj-F16 loaded alongside the MTP
+head.** `gguf/Qwen3.6-35B-A3B-DSV4Pro-Distill-mmproj-F16.gguf`, 0.84 GiB,
+SHA256-verified, loads cleanly with `spec-type = draft-mtp` — no conflict.
+Tool call (`get_weather`) and vision (four-quadrant color ID) both **PASS**.
+This candidate genuinely covers the same capability surface as `fast`
+(reasoning + vision + tools in one model), not a `coder`-shaped
+faster-but-narrower tradeoff. Caveat: this is a smoke test, not the depth of
+vision exercise `fast` has accumulated (Hermes Agent screenshot tooling) — if
+vision is load-bearing in practice, worth a closer look before cutover.
+
+**2. Its own spec-tuning peak is n-max=4, not n-max=3 inherited from `fast`.**
+The first pass above used `fast`'s tuned value as an untested assumption.
+Swept n-max 2/3/4/6 x p-min 0.0/0.2/0.3/0.5 (standalone :8081, c=32768,
+`probe-server.sh`, 3 samples each):
+
+| n-max | p-min | served tg median (range) | acceptance | mean draft len |
+|---|---|---|---|---|
+| 2 | 0.0 | 35.16 (34.77-36.45) | 0.79-0.86 | 2.58-2.70 |
+| 3 | 0.0 | 32.75 (32.73-40.39, noisy) | 0.69-0.93 | 2.97-3.79 |
+| **4** | **0.0** | **40.75 / 38.93 across two runs** (40.45-40.89 / 38.51-40.26) | **0.83-0.90** | 4.31-4.55 |
+| 4 | 0.2 | 39.48 (39.16-40.39) | 0.86-0.89 | 4.36-4.47 |
+| 4 | 0.3 | 33.13 (23.24-43.21, unstable) | 0.42-0.96 | 2.45-4.81 |
+| 4 | 0.5 | 40.79 (36.49-43.48) | 0.90-0.99 | 3.76-4.92 |
+| 6 | 0.0 | 40.06 (27.03-40.71, noisy — same n-max=6 regression shape `fast` shows) | 0.52-0.87 | 4.11-6.22 |
+
+Reproduced across two separate n-max=4 runs (40.75, 38.93), both well above
+n-max=3's 32.75. Unlike `fast`, `p-min` gives no reliable win here and 0.3
+actively destabilizes it — leave `p-min` at default. Net effect: ~20-25% more
+served tg than the number in the initial writeup above, now a solid,
+reproducible win over `fast`'s own served 34.6 t/s.
+
+**3. Full-context re-verify (c=131072, n-max=4).** Loads cleanly at the
+ctx-size `router.ini` actually uses. GTT usage 8.44 GiB — comfortably inside
+the pool. Depth sweep (`llama-bench`, `bench-guard.sh` clean, 41-75°C, no
+throttling):
+
+| | d0 | d8192 | d32768 | d65536 |
+|---|---|---|---|---|
+| pp512 | 368.18 ± 2.38 | 289.79 ± 3.97 | 175.08 ± 1.94 | 114.49 ± 0.45 |
+| tg64 | 28.73 ± 0.01 | 27.15 ± 0.09 | 23.14 ± 0.15 | 19.54 ± 0.07 |
+
+No depth collapse: retains 68% of tg64 at d65536, in the same healthy
+hybrid-GDN band as `fast` (70.5% retained) and `coder` (73.6% retained) — not
+close to MiniMax-M2.1's -65% collapse by d32768 alone.
+
+**Final recommendation: swap `fast` to this model.** Weighed the same way
+the `coder` swap was actually decided — not on score parity, but on the
+combination: it beats `fast` on base+served throughput (tuned: ~39-41 t/s vs
+`fast`'s 34.6), and wins hard reasoning decisively (10/10 zero-truncation in
+154s/15,749c vs `fast`'s 8-9/10 with truncations burning 72-95k chars) — the
+axis this repo weighs most heavily because it's the one built specifically to
+discriminate once the easy tiers saturate. Vision and tools tie (both work).
+`fast` edges ahead only on two small margins: code-eval-hard wall time
+(163s/27 turns vs 235s/33 turns, same 6/6 score) and depth-decay percentage
+(70.5% vs 68% retained at d65536) — neither large enough to offset a
+10-vs-8-out-of-10 hard-reasoning result. Smaller footprint too (20.22 vs 21.9
+GiB).
+
+**Proposed `router.ini` change, not yet applied:**
+```
+model             = /root/models/nerkyor-thinking-distill-q4.gguf
+mmproj            = /root/models/nerkyor-thinking-distill-mmproj-F16.gguf
+spec-type         = draft-mtp
+spec-draft-n-max  = 4
+; spec-draft-p-min left at default — no benefit found, unlike fast's 0.3
+ctx-size          = 131072
+```
+
+#### nerkyor/Qwen3.6-27B-DSV4Pro-GLM52-SFT-GPT55-RL-Coding-GGUF — rejected 2026-08-04, tested for `coder`
+
+`Q4_LynnStyle/...-Q4-LynnStyle.gguf`, 18.23 GiB, plus a
+`Q4-imatrix-MTP-draft.gguf` sidecar, 2.28 GiB — both SHA256-verified against
+the repo's own `SHA256SUMS`/`manifest.json`. **Confirmed dense via the raw
+GGUF header: zero expert tensors anywhere.** `general.architecture` reads
+`qwen35` (dense), matching the HF `dense` tag and the model card's own
+"LynnStyle Dense" framing exactly — nothing mislabeled here, unlike the
+current `coder`. The MTP draft is an unusual separate sidecar (the model's
+own extracted nextn layer plus a full embed/output copy) loaded via
+`--model-draft`, not embedded like the other three nerkyor releases.
+
+| condition | pp d0/4k/16k | tg d0/16k/32k | served pp/tg | acceptance |
+|---|---|---|---|---|
+| `bench.sh` (no spec) | 99.36 / 86.95 / 75.63 | **4.12 / 3.87 / 3.69** | — | — |
+| served, vendor's own MTP draft, n-max=2 | — | — | 81.2 median / **8.49 median** | 0.82-0.84, len 2.65-2.68 |
+
+This reproduces this repo's own dense-27B precedent (Qwopus3.6-27B-Fusion 4.6
+t/s base; Fable-Fusion-711 8.3 t/s with MTP, 0.66 acceptance) almost exactly —
+confirming it a third time. Evals run (standalone :8081, c=32768):
+`check-output.sh` OK/coherent, `reason-eval.sh` 8/8 in 174 s (4,884c),
+`code-eval.sh` 4/4 in 224 s / 19 turns — same score as `fast`/`coder` but
+2.2-2.4x slower wall time purely from throughput. `reason-eval-hard.sh`,
+`code-eval-hard.sh` and `code-eval-opencode.sh` were deliberately skipped: the
+throughput result alone is already dispositive per this repo's established
+rule that dense models don't work here, and three more multi-turn tiers at
+~8.5 t/s would have cost roughly an hour for a result that can't change the
+verdict.
+
+**Verdict: reject, confirmed on architecture and on two independent
+throughput measurements.** Decent quoted quality (vendor's own 92% MMLU / 82%
+Coding100, and this box's own 4/4 and 8/8 passes) cannot compensate for a
+3-6x throughput deficit against the `coder` slot it targets by name.
 
 ---
 

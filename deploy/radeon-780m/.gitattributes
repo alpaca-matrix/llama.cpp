@@ -1,0 +1,6 @@
+# Everything here is deployed to and executed on a Linux box. CRLF baked into
+# a committed .sh (or the .service unit) breaks direct execution on that box
+# (`#!/bin/bash\r: bad interpreter`) even though it looks fine in a Windows
+# editor. Force LF for the whole tree so this can't recur regardless of local
+# core.autocrlf.
+* text=auto eol=lf
