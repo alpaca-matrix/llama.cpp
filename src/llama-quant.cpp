@@ -1050,7 +1050,11 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
             metadata[i].target_type = tensor->type;
         }
 
-        metadata[i].requires_imatrix = tensor_requires_imatrix(tensor->name, metadata[i].target_type, ftype);
+        // a tensor already stored in its target type is copied verbatim, so it needs no imatrix.
+        // this is what makes a partial requantize possible: pin most tensors to their current type
+        // with --tensor-type-file and retarget only the few that should change.
+        metadata[i].requires_imatrix = metadata[i].target_type != tensor->type &&
+            tensor_requires_imatrix(tensor->name, metadata[i].target_type, ftype);
 
         if (params->imatrix) {
             metadata[i].remapped_imatrix_name = remap_imatrix(tensor->name, mapped);
