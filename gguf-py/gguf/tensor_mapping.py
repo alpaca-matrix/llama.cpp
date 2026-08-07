@@ -1300,6 +1300,10 @@ class TensorNameMap:
             "model.hidden_norm",        # dflash
         ),
 
+        MODEL_TENSOR.ENC_AUX_NORM: (
+            "model.aux_norm",           # dflash (laguna decoder)
+        ),
+
         MODEL_TENSOR.FC: (
             "model.fc", # dflash
         ),

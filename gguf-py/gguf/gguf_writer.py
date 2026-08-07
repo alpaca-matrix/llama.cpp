@@ -974,6 +974,9 @@ class GGUFWriter:
     def add_norm_before_fc(self, value: bool) -> None:
         self.add_bool(Keys.LLM.NORM_BEFORE_FC.format(arch=self.arch), value)
 
+    def add_decoder_arch(self, value: str) -> None:
+        self.add_string(Keys.LLM.DECODER_ARCH.format(arch=self.arch), value)
+
     def add_attention_output_group_count(self, count: int) -> None:
         self.add_uint32(Keys.Attention.OUTPUT_GROUP_COUNT.format(arch=self.arch), count)
 
