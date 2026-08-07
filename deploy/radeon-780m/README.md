@@ -67,6 +67,7 @@ Do not spend time on these; all measured zero or negative on this hardware.
 | Vulkan: `DMMV_WG_SIZE_LARGE` on the `_id` matvec for AMD | tg -1.9% (24.69 vs 25.16) - the NVIDIA/Intel spread-the-work heuristic does not fit 12 CUs |
 | Vulkan: FA scalar path for the 2-4-row verify batches | flat at 2.6k ctx (35.09 vs 35.07 served); untested at depth |
 | Vulkan: LOWER the `mul_mat_id` vector-path threshold to 1 | tg -27% (25.79 vs 35.07 served) - expert-count prepass + matrix tiles swamp the union-read saving at tiny n; with the earlier raise-to-32 rejection this brackets the default 8 as correct on this box |
+| Gated (Laguna) DFlash speculation on `laguna-eval` | code works, drafter loads, acceptance 0.62-0.75 - but +0.9% tg at best for 2.2 GiB of pool. MoE verify cost is ~linear in batch width, so break-even needs acceptance >0.55 (see below) |
 
 ### Stage 0 of fast-opt-plan: where decode time goes (2026-08-02)
 
@@ -135,6 +136,44 @@ accepted KV. Any future attempt has to reproduce the legacy attention context
 exactly, and must be gated on a token-for-token acceptance match rather than
 on throughput - the token stream alone looks correct here while the drafts
 behind it are not.
+
+### Speculation on a 256-expert MoE: the verify round is what costs (2026-08-07)
+
+Gated DFlash support for Laguna was implemented and measured on `laguna-eval`
+(full writeup in `candidates.md`). The code works - poolside's drafter loads
+all 76 tensors and reaches 0.62-0.75 acceptance - and it is still not worth
+turning on, for a reason that applies to any speculation attempt on this class
+of model.
+
+Round cost is flat in acceptance and set by the verify width. Measured at
+n-max 4: a 5-token verify round costs **~233 ms**, against **~73 ms** for a
+single unspeculated decode. That is 3.2x the cost for 5 tokens. On a dense
+bandwidth-bound model it would be close to 1x - the weights are read once
+either way. On a 256-expert top-10 MoE it is not, because each additional
+token in the verify batch routes to its own expert set and the union of expert
+weights read grows nearly linearly with the batch.
+
+So break-even needs `1 + n_max * acceptance > cost_ratio`: acceptance above
+~0.55 at n-max 4, above ~0.62 at n-max 2. Raising `spec-draft-p-min` does lift
+acceptance to 0.75-0.91, but only by declining to draft at all in the rounds
+that would have missed - drafted tokens fall from 1784 to 900 - so the gain
+cancels. Best measured result was +0.9% over no speculation, which is noise.
+
+Two things this predicts, both confirmed:
+
+- The **n-max 8 and 15 cliffs** (3.65 and 2.90 t/s against a 14.18 baseline)
+  are the `mul_mat_id` vector-path threshold, not acceptance. 5- and 7-token
+  batches stay on `mul_mat_vec_id`; 9 and 16 fall to the matrix path. Same
+  `<= 8` threshold as the two rejected attempts to move it.
+- **Vendor guidance does not transfer.** Poolside's own docs recommend
+  `--spec-draft-n-max 15`; that is the worst setting measured here, 4.9x
+  slower than not speculating. Their target is a compute-rich dGPU where
+  verify width is nearly free.
+
+The knob that would actually help is a **DSpark confidence head** (already
+implemented in this tree): a learned per-position accept probability truncates
+adaptively, instead of a single global p-min that has to be set for the
+average round. No DSpark drafter exists for Laguna as of 2026-08-07.
 
 ### Dense models do not work here
 

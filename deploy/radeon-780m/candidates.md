@@ -1395,3 +1395,112 @@ GGUF+mmproj pairing for Ming-flash-omni-2.0's non-text modalities; a
 Terminal-Bench 2.0 or Aider-polyglot figure for any MiniMax-M2.x point release,
 for GLM-4.6V, or for Ling-flash-2.0 / Ling-2.6-flash; **any file-tree byte size
 from ModelScope itself**, for the SPA reason given above.
+
+# Gated DFlash for Laguna — implemented and measured 2026-08-07
+
+Not a model candidate: a code change, plus the measurement that decides whether
+to use it. Follows up the `laguna-eval` note in `router.ini` that recorded the
+drafter as unloadable.
+
+## The drafter now loads, and the earlier arithmetic was exactly right
+
+`poolside/Laguna-S-2.1-GGUF/laguna-s-2.1-DFlash-BF16.gguf` failed with
+`wrong number of tensors; expected 76, got 69`. The guess on record was that
+the 7 unclaimed tensors were 6 `blk.N.attn_gate.weight` plus
+`enc.aux_norm.weight`. Dumped the file on the box: correct, both in identity
+and in shape — `attn_gate` is `[3072, 72]`, i.e. per-head (n_head 72), and
+`enc.aux_norm` is `[3072, 6]`, one norm vector per captured target layer.
+
+Support exists upstream only as poolside's own fork (`poolsideai/llama.cpp`,
+branch `laguna`, commit `9c899a68` "Full laguna support"). Upstream llama.cpp
+merged the Laguna *target* arch (PR #25165, #26233) but not the drafter-side
+contract. Ported from that commit.
+
+## Three differences the tensor count did not show
+
+Loading the two extra tensor kinds is the visible part. The rest would have
+loaded silently and drafted badly:
+
+1. **Context K/V through the input layernorm.** Generic DFlash projects the
+   fused target features raw into the draft KV cache; Laguna drafters project
+   them from the `attn_norm` output, matching their query path.
+2. **Causal noise block.** Generic DFlash sets `llama_set_causal_attn(false)`.
+   Laguna drafters are trained causal, keyed off `dflash.decoder_arch`.
+3. **`target_layers` ends at the layer count.** The GGUF asks for layers
+   `[2, 11, 20, 30, 39, 48]` from a 48-layer target. Index 48 is not a layer —
+   it means the pre-final-norm residual, captured through the nextn path. The
+   EAGLE3 implementation in this tree already handled exactly this; the DFlash
+   one did not.
+
+Also needed on the **target** side, and missing from upstream's merged
+`laguna.cpp`: `res->t_layer_inp[il]` capture per layer, and `res->t_h_nextn`
+before the final norm. Without these the target aborts at
+`llama-graph.cpp:1247` on the first request. The output-row gather in the last
+layer is deferred only when unmasked nextn extraction is actually on, so the
+unspeculated path keeps its narrowing and is unchanged.
+
+Poolside's fork also carries a Metal-specific f16 overflow workaround in
+`build_moe_ffn` and a non-finite sanitize on the target features, both for
+Laguna's massive activations (|x| ~ 1e6 at attention-sink tokens). The sanitize
+is ported (cheap, and it is the guard that proves the point); the `build_moe_ffn`
+rewrite is **not** — it is a Metal problem and it costs a sum-of-squares pass
+on every expert column. **On Vulkan the guard never fires**, checked across
+every measured run: no non-finite features on this backend.
+
+## Measured — and it buys nothing here
+
+IQ3_S, ctx 32768, `parallel 1`, q8_0 KV and q8_0 draft KV, 4 realistic coding
+prompts, 1200 generated tokens per config, box idle, production stopped.
+
+| config | tg t/s | acceptance |
+|---|---|---|
+| baseline, no drafter | **14.18** | — |
+| n-max 2, p-min 0 | 14.31 | 0.62 |
+| n-max 4, p-min 0.6 | 14.30 | 0.75 |
+| n-max 4, p-min 0.8 | 13.77 | 0.91 |
+| n-max 3, p-min 0 | 12.98 | 0.48 |
+| n-max 4, p-min 0 | 12.13 | 0.42 |
+| n-max 6, p-min 0 | 9.01 | 0.30 |
+| n-max 8, p-min 0 | 3.65 | 0.20 |
+| n-max 15, p-min 0 | 2.90 | 0.11 |
+
++0.9% at the peak, which is noise, for 2.2 GiB of the pool. **Left off.**
+
+## Why — the cost model, which generalises past this model
+
+Cost per round is flat in acceptance and set by the verify width. Measured from
+the n-max 4 runs: a 5-token verify round costs ~233 ms against ~73 ms for one
+unspeculated decode. That is 3.2x the cost for 5 tokens, where a dense
+bandwidth-bound model would pay close to 1x — each extra token in the verify
+batch routes to its own 10-of-256 experts, and the union of expert weights read
+is what this box is bandwidth-bound on.
+
+Break-even therefore needs `1 + n*acc > cost_ratio`: at n-max 4, acceptance
+above ~0.55; at n-max 2, above ~0.62. The drafter only clears that with p-min
+high enough that it stops drafting most of the time — at p-min 0.6 it drafts
+900 tokens where p-min 0 drafts 1784, and the win from the higher acceptance is
+cancelled by the rounds it declines to draft at all.
+
+This is the same MoE effect already recorded for `coder` ("keep MoE drafts at
+3-4"), measured here with the round cost isolated rather than inferred.
+
+Two side notes worth keeping:
+
+- **The n-max 8 and 15 collapses are the Vulkan `mul_mat_id` threshold**, not
+  acceptance. 5- and 7-token batches use the `mul_mat_vec_id` path; 9 and 16
+  fall to the matrix path. Consistent with the `<= 8` threshold finding already
+  in the README, and the reason n-max 8 is far worse than its acceptance alone
+  predicts.
+- **Poolside's own docs recommend `--spec-draft-n-max 15`.** On this box that
+  is the single worst setting measured, 4.9x slower than no speculation.
+  Vendor speculation guidance is written for compute-rich dGPUs and does not
+  transfer to a bandwidth-bound iGPU.
+
+## What would change the answer
+
+A drafter carrying a **DSpark confidence head** — this tree already implements
+DSpark, and a learned per-position accept probability truncates adaptively
+instead of by a fixed global p-min, which is exactly the knob the cost model
+says is missing. Poolside ships DFlash only for Laguna, no DSpark variant as of
+2026-08-07. Failing that, a denser main quant would raise the baseline decode
+cost and shift break-even down, but there is no room in the pool for one.
