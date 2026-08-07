@@ -468,7 +468,10 @@ Consequences:
 
 ### A second failure mode: DeviceLost on spec-model load
 
-Seen once, 2026-08-01, and distinct from the `probe-server.sh` stall above.
+Seen once, 2026-08-01, and distinct from the `probe-server.sh` stall above. It is
+also distinct from the ring-timeout `ErrorDeviceLost` below, which is the common
+one: this fails at *load* with an allocation error and an idle GPU, that one
+fails mid-request at depth with a `ring comp_* timeout` in the host kernel log.
 
 During the DFlash draft model's load-time sanity decode, the server logged
 `radv/amdgpu: Not enough memory for command submission` followed by
@@ -484,6 +487,107 @@ Recovery was the documented sequence and it worked: idle check, `systemctl stop`
 logging `Result: timeout`), GTT and VRAM drained fully, `systemctl reset-failed`,
 then a restart that succeeded first try. If you are restarting repeatedly while
 testing, space the restarts out.
+
+### ErrorDeviceLost at depth is the compute-ring watchdog (2026-08-05)
+
+Root-caused and fixed 2026-08-05. **This supersedes the earlier attribution to
+the MTP draft KV cache**, which is wrong - see "correcting the record" below.
+The comments in `router.ini` and the incident writeup in `candidates.md` still
+carry the old explanation.
+
+Symptom, seen from the LXC:
+
+```
+radv/amdgpu: The CS has been cancelled because the context is lost. This context is innocent.
+E srv  update_slots: decode() failed: vk::Queue::submit: ErrorDeviceLost
+```
+
+The `innocent` is a red herring - it only reflects that amdgpu took the
+per-queue reset path rather than a device-wide one, not that some other process
+was to blame. The real evidence is on the Proxmox host, and it names us:
+
+```
+amdgpu 0000:c4:00.0: ring comp_1.2.0 timeout, signaled seq=11104763, emitted seq=11104765
+amdgpu 0000:c4:00.0:  Process llama-server pid 752878
+amdgpu 0000:c4:00.0: Starting comp_1.2.0 ring reset ... Ring comp_1.2.0 reset succeeded
+amdgpu 0000:c4:00.0: [drm] device wedged, but recovered through reset
+```
+
+**Check `journalctl -k` on the host (`192.168.254.222`), not just the LXC.** Ten
+ring timeouts fired between Aug 03 and Aug 05; only seven of them appear in
+`journalctl -u llama-server`, because a crashed model child does not always get
+to log. `emitted = signaled + 2` in every one is just `sched_hw_submission = 2`
+(the ring depth), not a clue - it means the ring was full and the head job never
+signalled.
+
+Cause: **a single Vulkan compute submission ran past amdgpu's 2000 ms default
+lockup timeout.** Two independent lines of evidence for the 2 s figure:
+
+- `modinfo amdgpu | grep lockup_timeout` on this kernel (7.0.14-8-pve) reads
+  `default: 2000`, and `/sys/module/amdgpu/parameters/lockup_timeout` was empty,
+  so the default was in force. Note this differs from mainline, which uses 10 s
+  for graphics and 60 s for compute - do not assume the mainline value.
+- The Aug 04 22:51 event: the previous ubatch's fence signalled at 22:50:50 and
+  the ring timed out at 22:51:15, so the failing job's entire lifetime was under
+  25 s. A 60 s compute timeout is arithmetically impossible.
+
+And the work per submission is genuinely that large. At ~106k context a
+2048-token ubatch takes ~27 s wall clock (82 -> 77 t/s in the log) and
+flash-attention over the full KV dominates it, so one `FLASH_ATTN_EXT` node runs
+in the high hundreds of ms. The Vulkan backend cannot cut that: it caps a
+submission at `2 GFLOP x shader_core_count` for weak AMD parts (24 GFLOP at 12
+CUs) but then doubles that cap three times, and in any case **a single node
+cannot be split across submissions**. With ring depth 2 a job's watchdog starts
+while its predecessor is still running, so two consecutive FA dispatches share
+one 2 s budget.
+
+Everything fits: the failures are depth-dependent (`n_tokens` at failure was
+67160, 106011, 115537, 127774), prefill-heavy, recoverable by a queue reset
+rather than a device reset, and completely model-independent.
+
+**Correcting the record.** The earlier writeup blamed Thinking-Distill's MTP
+draft KV running at `f16` instead of `q8_0`, and that model lost the `fast`
+alias twice and had its weights deleted over it. It is exonerated:
+
+- Aug 03 21:05 and 22:08 hit **`coder`** (`nerkyor-dsv4pro-q4.gguf`), which has
+  no MTP head, no drafter and no speculation of any kind. Both predate the
+  Thinking-Distill swap entirely.
+- Three more fired Aug 05 01:30 to 02:08, after `nerkyor-eval` was killed.
+
+The `spec-draft-type-k/v = q8_0` setting is still worth keeping for the memory
+it saves (see the table above), but it was never the fix for this.
+
+**Fix 1 (host, primary):** `amdgpu.lockup_timeout=10000,60000,10000,10000` on
+the kernel cmdline. See "Host prerequisites". Applied 2026-08-05.
+
+**Fix 2 (config, held in reserve):** if it recurs even at 60 s, bound the
+worst-case dispatch directly - `ctx-size` back to 131072, or `ubatch-size` 2048
+-> 1024 on the deep aliases. FA dispatch time scales linearly with ubatch. Both
+cost measured pp, which is why neither was applied first.
+
+**Fix 3 (code, applied):** the loss used to be unsurvivable *and* silent.
+Nothing in the Vulkan backend recreates a lost `VkDevice`, and
+`server-context.cpp` catches the exception and reports a request error, so the
+instance kept serving a dead device until an uncaught throw from a path with no
+`vk::SystemError` catch finally killed it. On Aug 04 that took **26 minutes**:
+
+```
+12:35:26  decode() failed: vk::Queue::submit: ErrorDeviceLost
+13:01:37  terminate called after throwing an instance of 'vk::DeviceLostError'
+13:01:44  (router respawns the child)
+```
+
+`ggml_vk_queue_submit()` in `ggml/src/ggml-vulkan/ggml-vulkan.cpp` now converts
+`vk::DeviceLostError` into a `GGML_ABORT` at the point of failure, matching how
+the file already handles other unrecoverable Vulkan errors. Every submit in the
+backend routes through `vk_queue_handle::submit`, so the two overrides are the
+only call sites needed. The child now dies in seconds with an attributable
+message and the router respawns it, instead of wedging. Upstreamable as-is.
+
+**What to watch.** `journalctl -k` on the host for `ring comp_* timeout`. A
+`Fence fallback timer expired on ring comp_*` line is a near-miss (a missed
+interrupt the fallback timer caught) and is worth noting but is not a hang - one
+appeared Aug 05 05:14.
 
 ### Prompt processing through the server is not a stable measurement
 
@@ -526,12 +630,21 @@ Kernel cmdline (Proxmox host), then reboot:
 
 ```
 amd_iommu=on iommu=pt amdgpu.gttsize=61440 amdgpu.no_system_mem_limit=1 \
-transparent_hugepage=always ttm.pages_limit=15728640
+transparent_hugepage=always ttm.pages_limit=15728640 \
+amdgpu.lockup_timeout=10000,60000,10000,10000
 ```
 
 `ttm.pages_limit` is in 4 KiB pages: GiB x 262144. 15728640 = 60 GiB. This is the
 binding limit - `amdgpu.gttsize` alone is deprecated and does not raise the TTM
 cap. Keep the two aligned or the kernel logs a mismatch warning.
+
+`amdgpu.lockup_timeout` is `GFX,Compute,SDMA,Video` in ms. This module's default
+is 2000 ms for all four, which is a graphics frame deadline and is far too short
+for the multi-hundred-ms compute dispatches this workload submits at depth - it
+was the cause of the recurring `ErrorDeviceLost` documented below. Compute goes
+to 60 s; the box is headless, so nothing depends on a short watchdog. Verify it
+took after reboot with `cat /sys/module/amdgpu/parameters/lockup_timeout`, which
+reads back **empty** when the default is in force.
 
 Container config (`/etc/pve/lxc/<id>.conf`):
 
