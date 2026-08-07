@@ -288,6 +288,57 @@ and make sure nothing else is driving the server while sampling.
 | `spec-type ngram-*` (all variants) | 0 to -4% with varied prompts |
 | ROCm/HIP backend | wins pp by 7-11%, loses tg by 11-21%, caps at 39 GiB |
 
+### The load window after a restart is as dangerous as one mid-decode (2026-08-07)
+
+"Restart only when idle" is necessary but **not sufficient**, and the gap cost a
+hard power cycle. The box was idle and the restart itself was clean; the orphan
+came from a request sent ~45 s later, while the startup model was still loading.
+
+With `models-max = 1`, a request for any other alias makes the router evict the
+current one. If that one is still loading, it is force-killed mid-allocation:
+
+```
+srv  ensure_model: model name=coder is not loaded, loading...
+srv    unload_lru: models_max limit reached, removing LRU name=fast
+srv        unload: model name=fast is still loading, force-killing
+srv    operator(): force-killing model instance name=fast after 10 seconds timeout
+```
+
+That child went uninterruptible `D` in `drm_suballoc_new`, holding 15.6 GiB of
+GTT and **100% of VRAM**. It is a teardown deadlock: the dying process has to
+allocate in order to free, and there is nothing left to allocate from. Host
+kernel trace, repeating every 122 s:
+
+```
+INFO: task llama-server:645181 blocked for more than 614 seconds.
+  amdgpu_ib_get -> amdgpu_job_alloc_with_ib -> amdgpu_vm_sdma_prepare
+  -> amdgpu_vm_bo_update -> amdgpu_vm_handle_moved -> amdgpu_cs_ioctl
+```
+
+**Distinguish this from the ErrorDeviceLost class.** There is no hung job here,
+so no ring timeout fires and `amdgpu.lockup_timeout` is irrelevant - dmesg shows
+zero reset or recover events. `amdgpu_gpu_recover` cannot help for the same
+reason, and `SIGKILL` cannot reap a `D`-state task. Only a hard power cycle
+cleared it, same as the 2026-07-31 orphan.
+
+The rule that actually covers both cases:
+
+> After any `systemctl restart llama-server`, send nothing until the journal
+> shows `srv llama_server: model loaded` followed by `listening on`.
+
+```sh
+journalctl -u llama-server -f | grep -m1 'llama_server: model loaded'
+```
+
+Swapping aliases is safe once a model is **fully** loaded - the eviction path is
+only destructive against a child that is still loading. Verified clean
+immediately afterwards across three swaps (`fast` 33.65 t/s with MTP acceptance
+35/41, `coder` 26.6, `laguna-eval` 13.38).
+
+Note `/slots` is not a sufficient idle check on its own: during startup load it
+answers for the router, not the child, so it can look quiet while a load is in
+flight. `/health` returning `ok` likewise does not mean loading has finished.
+
 ### The probe-server stall on `coder`
 
 Measured 2026-08-01. `probe-server.sh` reliably stalls `coder` on the third or
@@ -743,7 +794,8 @@ so an unattended update can silently invalidate it.
 ```sh
 git -C /root/llama.cpp pull --ff-only
 cp /root/llama.cpp/deploy/radeon-780m/router.ini /etc/llama/
-systemctl restart llama-server        # only when idle - see below
+systemctl restart llama-server        # only when idle, then wait for the load - see below
+journalctl -u llama-server -f | grep -m1 'llama_server: model loaded'
 ```
 
 **Config plus new llama.cpp** (picking up upstream changes). Rebuild first, and
@@ -756,15 +808,21 @@ cd /root/llama.cpp/deploy/radeon-780m && ./build.sh
 cp router.ini /etc/llama/
 cp llama-server.service /etc/systemd/system/ && systemctl daemon-reload
 systemctl start llama-server
+journalctl -u llama-server -f | grep -m1 'llama_server: model loaded'   # wait, do not skip
 ./bench.sh <model>                    # confirm ubatch 2048 is still optimal
 ./probe-server.sh coder 6             # real serving speed, incl. speculation
 ```
 
 Three things to know:
 
-- **Restart only when idle.** Tearing down mid-decode can wedge a model child in
-  the GPU driver; see "Watch for silent CPU fallback" for why that is expensive.
-  Check with `curl -s localhost:8080/slots`.
+- **Restart only when idle, then wait for the load to finish.** Tearing down
+  mid-decode can wedge a model child in the GPU driver, and so can a request
+  that arrives while the startup model is still loading - `models-max = 1`
+  force-kills a still-loading child to make room. Both wedges cost a hard power
+  cycle. Check idle with `curl -s localhost:8080/slots`, then wait for
+  `journalctl -u llama-server -f | grep -m1 'llama_server: model loaded'` before
+  sending anything. See "The load window after a restart is as dangerous as one
+  mid-decode" and "Watch for silent CPU fallback".
 - **Re-verify after any llama.cpp or Mesa change.** Optimal ubatch moved the last
   time Mesa was upgraded, and the speculation settings are build-specific. A new
   build is a reason to re-run `bench.sh`, not to assume the numbers hold.
