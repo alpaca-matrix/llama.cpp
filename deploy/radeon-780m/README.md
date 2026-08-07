@@ -210,14 +210,19 @@ experts to IQ2_S, which is right for quality per byte *stored* and wrong here.
 Requantizing just those two tensors to IQ4_XS (`pin-tensor-types.py` +
 `llama-quantize --tensor-type-file`, everything else byte-copied):
 
-| variant | attention | size | tg | pp4096 | PPL (80 chunks, held-out code) |
+| variant | retargeted to IQ4_XS | size | tg | pp4096 | PPL (80 chunks, held-out code) |
 |---|---|---|---|---|---|
-| base UD-IQ3_S | Q6_K | 45.10 GiB | 13.77 | 147.5 | 2.3658 +/- 0.0339 |
-| Q5_K | Q5_K | 44.78 GiB | 14.16 | — | 2.3674 +/- 0.0341 |
-| **IQ4_XS** | **IQ4_XS** | **44.42 GiB** | **16.08** | **151.0** | **2.3660 +/- 0.0339** |
+| base UD-IQ3_S | — | 45.10 GiB | 13.77 | 147.5 | 2.3658 +/- 0.0339 |
+| Q5_K control | attn_q, attn_output | 44.78 GiB | 14.16 | — | 2.3674 +/- 0.0341 |
+| V2 | attn_q, attn_output | 44.42 GiB | 16.08 | 151.0 | 2.3660 +/- 0.0339 |
+| **V3** | **+ attn_k, attn_v, shexp** | **44.21 GiB** | **16.95** | **153.3** | **2.3657 +/- 0.0337** |
 
-**+16.8% tg at unchanged perplexity.** The Q6_K attention was pure
-overprovisioning - quality is already set by the IQ2_S experts.
+**+23.1% tg and +3.9% pp at unchanged perplexity** (V3 lands 0.0001 *below*
+stock, i.e. noise). The Q6_K attention was pure overprovisioning - quality is
+already set by the IQ2_S experts. `output.weight` and `token_embd` were left at
+Q6_K; lm_head is where 4 bits is known to bite and they are only 0.24
+GiB/token. This is specific to a mix this lopsided - do not assume it carries
+to a model whose experts are already at 4 bits or better.
 
 Two things to carry forward:
 
@@ -225,11 +230,50 @@ Two things to carry forward:
   been +7.5%; it measured +2.8%, because its 5-bit unpack is split across two
   planes and is slower per byte than the Q6_K it replaced. The bytes-per-token
   model predicts bandwidth, not dequant cost - confirm with llama-bench.
-- **This win and the drafter win overlap.** +13.1% (requant) and +19.4%
-  (drafter) compose to +20.1%, not +35%: the requant cuts a round's fixed
-  bytes, while the drafter's marginal cost is per-verify-token expert bytes.
-  Cutting fixed cost also raises the break-even acceptance, from ~0.45 to
-  ~0.51 at n-max 2 against a measured 0.611.
+- **This win and the drafter win are substitutes, not complements** - and on
+  the full V3 requant the drafter turns into a net loss. See below.
+
+### Requantizing the target un-does a feature-conditioned drafter (2026-08-07)
+
+Served tg through `spec-sweep.sh`, same four prompts throughout:
+
+| config | tg | acceptance |
+|---|---|---|
+| stock, no drafter | 14.15 | — |
+| V2, no drafter | 16.00 | — |
+| **V3, no drafter** | **16.75** | — |
+| stock + Q4_K_M drafter, n-max 2 | 16.89 | 0.617 |
+| V2 + drafter, n-max 2 | 17.00 | 0.611 |
+| V3 + drafter, n-max 2 | 16.05 | **0.544** |
+| V3 + drafter, n-max 1 | 16.68 | 0.688 |
+
+Two effects push the same way, both predicted by the round cost model:
+
+1. **A faster base raises break-even acceptance.** The requant cuts a round's
+   *fixed* bytes but not the per-verify-token expert bytes, so `T1` falls while
+   the marginal verify cost does not. Break-even at n-max 2 moved from ~0.45 on
+   stock to ~0.556 on V3; at n-max 1 it is ~0.670.
+2. **Requantizing the target degrades draft acceptance**: 0.617 -> 0.611 (V2)
+   -> 0.544 (V3). This is mechanistic. DFlash conditions on the *target's
+   internal hidden states* at layers 1/10/19/29/38/47, and V3 is the first
+   variant to requantize `attn_k`/`attn_v`, which changes the KV cache and so
+   those states pervasively - where V2 only touched `attn_q`/`attn_output`. The
+   drafter was trained against a full-precision target and is now off
+   distribution.
+
+At 0.544 against a 0.556 break-even the drafter lands the wrong side and costs
+4%; at n-max 1 it is a wash.
+
+**Carry forward: a feature-conditioned drafter (DFlash, EAGLE3) is coupled to
+the target's quantization in a way a vocabulary-only drafter is not.
+Re-measure acceptance after any change to the target file.**
+
+The top three configs (17.00 / 16.89 / 16.75) are inside the noise of a
+4-prompt median, so this is not a claim that V3-alone is fastest. It is a claim
+that they tie and V3-alone is the better engineering: no drafter in the pool,
+0.9 GiB smaller, best prefill of the three, and no prompt-dependent variance -
+the four prompts returned 16.76/16.75/16.74/16.74 against 15.96-19.37 for
+V2+drafter.
 
 ### Dense models do not work here
 

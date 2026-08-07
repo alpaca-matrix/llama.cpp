@@ -1630,10 +1630,79 @@ and free in quality; the drafter is the bigger single win), but the combination
 is where the ceiling is, and on these four prompts V2+drafter is not separable
 from drafter alone.
 
-## Next, untested
+## V3: extending IQ4_XS to the rest of the per-token reads
 
-Extending IQ4_XS to `attn_k`, `attn_v` and the shared experts (leaving
-`output.weight` and `token_embd` at Q6_K, which are the sensitive ones) removes
-another ~0.20 GiB/token, predicted ~+6% unspeculated. Given attention
-requantization measured free in perplexity, this is likely also free, but it is
-predicted, not measured.
+Same treatment applied to `attn_k`, `attn_v` and the three shared-expert
+tensors as well, 333 tensors retargeted in total. `output.weight` and
+`token_embd` stay Q6_K - lm_head is the one place 4 bits is known to bite, and
+they are only 0.24 GiB/token between them.
+
+| variant | retargeted | size | tg | pp512 | pp4096 | PPL |
+|---|---|---|---|---|---|---|
+| base UD-IQ3_S | — | 45.10 GiB | 13.77 | 106.3 | 147.5 | 2.3658 +/- 0.0339 |
+| V2 (q, output) | 96 | 44.42 GiB | 16.08 | 111.3 | 151.0 | 2.3660 +/- 0.0339 |
+| **V3 (+ k, v, shexp)** | **333** | **44.21 GiB** | **16.95** | **111.8** | **153.3** | **2.3657 +/- 0.0337** |
+
+**+23.1% tg and +3.9% pp over stock, at a perplexity that is 0.0001 *below*
+the original** - i.e. unchanged, the difference is noise. Predicted 17.06 t/s
+from the byte budget, measured 16.95. IQ4_XS keeps hitting its prediction where
+Q5_K did not.
+
+The honest reading is that Unsloth's UD mix carries roughly 0.9 GiB per token
+of attention and shared-expert precision that buys nothing measurable on this
+model, because quality is already pinned by the IQ2_S routed experts. That is
+specific to a mix this lopsided - do not assume it generalises to a model whose
+experts are at 4 bits or better.
+
+`token_embd` and `output.weight` at IQ4_XS would remove another ~0.08
+GiB/token, ~+2%. Not attempted: lm_head is the sensitive one and the return no
+longer justifies the risk.
+
+## ...and then the drafter lost to the requant
+
+Both optimisations measured together, served through `spec-sweep.sh` on the
+same four prompts:
+
+| config | tg | acceptance |
+|---|---|---|
+| stock, no drafter | 14.15 | — |
+| V2, no drafter | 16.00 | — |
+| **V3, no drafter** | **16.75** | — |
+| stock + Q4_K_M drafter, n-max 2 | 16.89 | 0.617 |
+| V2 + drafter, n-max 2 | 17.00 | 0.611 |
+| V3 + drafter, n-max 2 | 16.05 | **0.544** |
+| V3 + drafter, n-max 1 | 16.68 | 0.688 |
+
+On V3 the drafter is a net loss at n-max 2 and a wash at n-max 1. Two effects,
+both predicted by the round cost model:
+
+1. **A faster base raises break-even acceptance.** The requant cuts a round's
+   fixed bytes but not the per-verify-token expert bytes, so `T1` falls while
+   marginal verify cost does not. Break-even at n-max 2: ~0.45 stock, ~0.556 on
+   V3. At n-max 1: ~0.670, against a measured 0.688 - hence the wash.
+2. **Requantizing the target degrades draft acceptance**: 0.617 -> 0.611 (V2)
+   -> 0.544 (V3). Mechanistic, not noise. DFlash conditions on the target's
+   *internal hidden states* at layers 1/10/19/29/38/47. V3 is the first variant
+   to requantize `attn_k`/`attn_v`, which changes the KV cache and therefore
+   those states pervasively; V2 only touched `attn_q`/`attn_output`, which is
+   why V2 held acceptance and V3 did not. The drafter was trained against a
+   full-precision target and is now off distribution.
+
+**This is the transferable result: a feature-conditioned drafter (DFlash,
+EAGLE3) is coupled to the target's quantization in a way a vocabulary-only
+drafter is not.** Changing the target file invalidates the drafter's measured
+acceptance. Re-measure; never carry an acceptance figure across a requant.
+
+## What was deployed and why
+
+`laguna-eval` runs V3 with no drafter. The top three configs (17.00 / 16.89 /
+16.75) sit inside the noise of a 4-prompt median, so this is not a claim that
+V3-alone is the fastest - it is a claim that they tie, and V3-alone wins on
+everything else: no drafter in the pool, 0.9 GiB smaller, the best prefill of
+the three, and no prompt-dependent variance. Unspeculated V3 returned
+16.76/16.75/16.74/16.74 across the four prompts; V2+drafter ranged 15.96-19.37
+depending on how predictable the continuation was. For an interactive coding
+backend the flat one is worth more than a median 1.5% higher.
+
+The Q4_K_M drafter stays on disk. It is worth +19.4% against the stock file,
+and it is the thing to re-test if a DSpark-headed Laguna drafter ever ships.
