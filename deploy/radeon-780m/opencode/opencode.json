@@ -30,6 +30,10 @@
         "nerkyor-eval": {
           "name": "nerkyor-eval - nerkyor/Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill (35B-A3B, MTP)",
           "limit": { "context": 262144, "output": 32768 }
+        },
+        "laguna-eval": {
+          "name": "laguna-eval - poolside/Laguna-S-2.1 UD-IQ3_S (118B-A8B, DFlash)",
+          "limit": { "context": 262144, "output": 32768 }
         }
       }
     }
