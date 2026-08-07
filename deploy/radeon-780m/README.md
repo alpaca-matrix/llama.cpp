@@ -67,7 +67,7 @@ Do not spend time on these; all measured zero or negative on this hardware.
 | Vulkan: `DMMV_WG_SIZE_LARGE` on the `_id` matvec for AMD | tg -1.9% (24.69 vs 25.16) - the NVIDIA/Intel spread-the-work heuristic does not fit 12 CUs |
 | Vulkan: FA scalar path for the 2-4-row verify batches | flat at 2.6k ctx (35.09 vs 35.07 served); untested at depth |
 | Vulkan: LOWER the `mul_mat_id` vector-path threshold to 1 | tg -27% (25.79 vs 35.07 served) - expert-count prepass + matrix tiles swamp the union-read saving at tiny n; with the earlier raise-to-32 rejection this brackets the default 8 as correct on this box |
-| Gated (Laguna) DFlash speculation on `laguna-eval` | code works, drafter loads, acceptance 0.62-0.75 - but +0.9% tg at best for 2.2 GiB of pool. MoE verify cost is ~linear in batch width, so break-even needs acceptance >0.55 (see below) |
+| ~~Gated (Laguna) DFlash speculation on `laguna-eval`~~ | **REVERSED 2026-08-07** - the drafter was being run at its shipped BF16, which costs ~35 ms of a ~156 ms round on this bandwidth-bound box and ate the whole margin. Quantized to Q4_K_M it is +19.4%, not +0.9%. See "A BF16 drafter cannot pay for itself" below |
 
 ### Stage 0 of fast-opt-plan: where decode time goes (2026-08-02)
 
@@ -137,43 +137,99 @@ exactly, and must be gated on a token-for-token acceptance match rather than
 on throughput - the token stream alone looks correct here while the drafts
 behind it are not.
 
-### Speculation on a 256-expert MoE: the verify round is what costs (2026-08-07)
+### A BF16 drafter cannot pay for itself (2026-08-07)
 
-Gated DFlash support for Laguna was implemented and measured on `laguna-eval`
-(full writeup in `candidates.md`). The code works - poolside's drafter loads
-all 76 tensors and reaches 0.62-0.75 acceptance - and it is still not worth
-turning on, for a reason that applies to any speculation attempt on this class
-of model.
+Gated DFlash support for Laguna was implemented, measured, and rejected on
+`laguna-eval` earlier the same day at +0.9%. That rejection was wrong. The
+drafter had been left at the BF16 poolside ships, and **the drafter's own
+weights are read in full on every draft round, exactly like the target's**. At
+2.08 GiB that is ~35 ms of a ~156 ms round - the entire speculation margin.
 
-Round cost is flat in acceptance and set by the verify width. Measured at
-n-max 4: a 5-token verify round costs **~233 ms**, against **~73 ms** for a
-single unspeculated decode. That is 3.2x the cost for 5 tokens. On a dense
-bandwidth-bound model it would be close to 1x - the weights are read once
-either way. On a 256-expert top-10 MoE it is not, because each additional
-token in the verify batch routes to its own expert set and the union of expert
-weights read grows nearly linearly with the batch.
+Re-measured with nothing changed but the drafter's quantization (ctx 32768,
+`parallel 1`, 4 coding prompts, 300 tokens each, box idle, production stopped):
 
-So break-even needs `1 + n_max * acceptance > cost_ratio`: acceptance above
-~0.55 at n-max 4, above ~0.62 at n-max 2. Raising `spec-draft-p-min` does lift
-acceptance to 0.75-0.91, but only by declining to draft at all in the rounds
-that would have missed - drafted tokens fall from 1784 to 900 - so the gain
-cancels. Best measured result was +0.9% over no speculation, which is noise.
+| drafter | file | tg @ n-max 2 | vs baseline | acceptance |
+|---|---|---|---|---|
+| BF16 (as shipped) | 2.08 GiB | 14.22 | +0.5% | 0.601 |
+| Q8_0 | 1.10 GiB | 15.57 | +10.0% | 0.591 |
+| Q3_K_M | 0.50 GiB | 16.04 | +13.4% | 0.588 |
+| IQ4_XS | 0.55 GiB | 16.05 | +13.4% | 0.591 |
+| **Q4_K_M** | **0.60 GiB** | **16.89** | **+19.4%** | **0.617** |
 
-Two things this predicts, both confirmed:
+Baseline is 14.15 t/s with no drafter. **Acceptance is flat at 0.59-0.62 across
+every quantization** - a 4-bit drafter drafts as well as a 16-bit one - so the
+whole spread is bytes read, not draft quality. Q3_K_M being no better than
+Q4_K_M despite being smaller marks the floor.
 
-- The **n-max 8 and 15 cliffs** (3.65 and 2.90 t/s against a 14.18 baseline)
-  are the `mul_mat_id` vector-path threshold, not acceptance. 5- and 7-token
-  batches stay on `mul_mat_vec_id`; 9 and 16 fall to the matrix path. Same
+The draft length barely matters once the drafter is cheap. Q4_K_M at n-max 1 /
+2 / 3 measures 15.90 / 16.89 / 15.69, and n-max 4 with p-min 0.6 measures
+16.60; that whole band is inside the noise of a 4-prompt median (individual
+prompts ranged 14.03-18.54). Take n-max 2, p-min 0 and do not over-tune it.
+
+What survives from the earlier analysis is the **cost model**, which is still
+correct and still the reason to keep drafts short here: round cost is flat in
+acceptance and set by verify width, because each extra token in the batch
+routes to its own 10-of-256 experts. Break-even needs `1 + n_max*acceptance >
+cost_ratio`, which lands near acceptance 0.5 at n-max 2. Laguna's drafter sits
+just above that, which is why the BF16 overhead was enough to hide the win
+entirely.
+
+Two corrections to what was recorded with it:
+
+- **Poolside does not recommend `--spec-draft-n-max 15`.** Their model card
+  recommends **7** speculative tokens for vLLM and describes 15 as the *clamp*
+  (trained `block_size` 16, minus the anchor token). The earlier note read a
+  ceiling as advice. 15 is still the worst setting measured here.
+- The **n-max 8 and 15 cliffs** are real and unchanged: 9- and 16-token verify
+  batches fall off the `mul_mat_vec_id` path onto the matrix path, the same
   `<= 8` threshold as the two rejected attempts to move it.
-- **Vendor guidance does not transfer.** Poolside's own docs recommend
-  `--spec-draft-n-max 15`; that is the worst setting measured here, 4.9x
-  slower than not speculating. Their target is a compute-rich dGPU where
-  verify width is nearly free.
 
-The knob that would actually help is a **DSpark confidence head** (already
-implemented in this tree): a learned per-position accept probability truncates
-adaptively, instead of a single global p-min that has to be set for the
-average round. No DSpark drafter exists for Laguna as of 2026-08-07.
+A **DSpark confidence head** would still help (adaptive per-position truncation
+instead of a global p-min), and no DSpark drafter exists for Laguna. But it is
+no longer the thing standing between this model and a working drafter.
+
+**Generalisation worth keeping: never load a drafter at F16/BF16 on this box.**
+This applies to DFlash, EAGLE3 and plain draft models alike. Vendors ship
+drafters unquantized because on a compute-rich dGPU the extra weight traffic is
+free; here it is the whole budget. `llama-quantize --allow-requantize <drafter>
+<out> Q4_K_M 8` takes about two seconds.
+
+### Published quant mixes are not optimised for a bandwidth-bound box (2026-08-07)
+
+Generation speed here is arithmetic: **bytes read per token, divided by ~70
+GB/s**. Laguna-S-2.1 UD-IQ3_S reads 4.93 GB/token and serves at 70.7 ms/token =
+69.8 GB/s effective, so its decode path is already near optimal and the only
+lever left is reading fewer bytes.
+
+Computing that budget from the GGUF exposes a badly allocated mix. `attn_q` +
+`attn_output` at Q6_K are **41.6% of per-token traffic - more than all 256
+experts combined** - because they are read in full every token while any one
+expert is read 10 times in 256. Unsloth's UD mixes protect attention and crush
+experts to IQ2_S, which is right for quality per byte *stored* and wrong here.
+
+Requantizing just those two tensors to IQ4_XS (`pin-tensor-types.py` +
+`llama-quantize --tensor-type-file`, everything else byte-copied):
+
+| variant | attention | size | tg | pp4096 | PPL (80 chunks, held-out code) |
+|---|---|---|---|---|---|
+| base UD-IQ3_S | Q6_K | 45.10 GiB | 13.77 | 147.5 | 2.3658 +/- 0.0339 |
+| Q5_K | Q5_K | 44.78 GiB | 14.16 | — | 2.3674 +/- 0.0341 |
+| **IQ4_XS** | **IQ4_XS** | **44.42 GiB** | **16.08** | **151.0** | **2.3660 +/- 0.0339** |
+
+**+16.8% tg at unchanged perplexity.** The Q6_K attention was pure
+overprovisioning - quality is already set by the IQ2_S experts.
+
+Two things to carry forward:
+
+- **Prefer IQ4_XS to Q5_K on this backend.** Q5_K saves 328 MiB and should have
+  been +7.5%; it measured +2.8%, because its 5-bit unpack is split across two
+  planes and is slower per byte than the Q6_K it replaced. The bytes-per-token
+  model predicts bandwidth, not dequant cost - confirm with llama-bench.
+- **This win and the drafter win overlap.** +13.1% (requant) and +19.4%
+  (drafter) compose to +20.1%, not +35%: the requant cuts a round's fixed
+  bytes, while the drafter's marginal cost is per-verify-token expert bytes.
+  Cutting fixed cost also raises the break-even acceptance, from ~0.45 to
+  ~0.51 at n-max 2 against a measured 0.611.
 
 ### Dense models do not work here
 

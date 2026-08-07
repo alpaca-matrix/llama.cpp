@@ -1449,6 +1449,15 @@ every measured run: no non-finite features on this backend.
 
 ## Measured — and it buys nothing here
 
+> **SUPERSEDED the same day.** Every number in this section was measured with
+> the drafter at the BF16 poolside ships. The drafter's weights are read in
+> full on every draft round, so 2.08 GiB of BF16 was costing ~35 ms of a
+> ~156 ms round and hiding the entire win. Quantized to Q4_K_M the same
+> drafter measures **+19.4%**, not +0.9%. See "The drafter's own quantization
+> was the whole story" at the end of this section. The cost model below is
+> still correct and still worth reading - it is the reason drafts have to stay
+> short here - only the verdict changed.
+
 IQ3_S, ctx 32768, `parallel 1`, q8_0 KV and q8_0 draft KV, 4 realistic coding
 prompts, 1200 generated tokens per config, box idle, production stopped.
 
@@ -1491,16 +1500,140 @@ Two side notes worth keeping:
   fall to the matrix path. Consistent with the `<= 8` threshold finding already
   in the README, and the reason n-max 8 is far worse than its acceptance alone
   predicts.
-- **Poolside's own docs recommend `--spec-draft-n-max 15`.** On this box that
-  is the single worst setting measured, 4.9x slower than no speculation.
-  Vendor speculation guidance is written for compute-rich dGPUs and does not
-  transfer to a bandwidth-bound iGPU.
+- ~~**Poolside's own docs recommend `--spec-draft-n-max 15`.**~~ **Misread.**
+  Their model card recommends **7** speculative tokens for vLLM and gives 15
+  as the *clamp* — the trained `block_size` of 16 minus the anchor token. 15
+  is still the worst setting measured here, but it was never advice.
 
-## What would change the answer
+## The drafter's own quantization was the whole story
+
+Re-measured with the identical harness, changing only the drafter file:
+
+| drafter | file | tg @ n-max 2 | vs baseline | acceptance |
+|---|---|---|---|---|
+| BF16 (as shipped) | 2.08 GiB | 14.22 | +0.5% | 0.601 |
+| Q8_0 | 1.10 GiB | 15.57 | +10.0% | 0.591 |
+| Q3_K_M | 0.50 GiB | 16.04 | +13.4% | 0.588 |
+| IQ4_XS | 0.55 GiB | 16.05 | +13.4% | 0.591 |
+| **Q4_K_M** | **0.60 GiB** | **16.89** | **+19.4%** | **0.617** |
+
+Baseline 14.15 t/s, `deploy/radeon-780m/spec-sweep.sh`. The BF16 row reproduces
+the +0.9% of the original table, which is what confirms the two runs are
+comparable and that nothing else changed.
+
+**Acceptance is flat at 0.59-0.62 across every quantization.** The drafter
+drafts exactly as well at 4 bits as at 16, so the entire spread is bytes read
+per round, not draft quality. Q3_K_M being no better than Q4_K_M despite being
+120 MiB smaller marks the floor — below Q4 the acceptance loss starts to cost
+more than the bytes save.
+
+Draft length stops mattering much once drafting is cheap: Q4_K_M at n-max
+1/2/3 measures 15.90 / 16.89 / 15.69 and n-max 4 with p-min 0.6 measures 16.60.
+That band is inside the noise of a 4-prompt median — individual prompts ranged
+14.03-18.54, straddling the ~0.5 break-even acceptance the cost model predicts.
+Take n-max 2, p-min 0; do not over-tune it on four prompts.
+
+Quantizing also removes the other objection: the drafter costs 0.60 GiB of the
+pool instead of 2.2 GiB.
+
+## What would change the answer further
 
 A drafter carrying a **DSpark confidence head** — this tree already implements
 DSpark, and a learned per-position accept probability truncates adaptively
 instead of by a fixed global p-min, which is exactly the knob the cost model
 says is missing. Poolside ships DFlash only for Laguna, no DSpark variant as of
-2026-08-07. Failing that, a denser main quant would raise the baseline decode
-cost and shift break-even down, but there is no room in the pool for one.
+2026-08-07. It is no longer what stands between this model and a working
+drafter, only what would push it past +19%.
+
+# Rebalancing the quant byte budget on Laguna — 2026-08-07
+
+Not a model candidate: a rewrite of an existing GGUF's quantization mix, and
+the measurement that justifies it. Follows the DFlash work above.
+
+## Generation speed here is arithmetic on bytes per token
+
+Laguna-S-2.1 UD-IQ3_S reads **4.93 GB per token** and serves at 70.7 ms per
+token = **69.8 GB/s effective**, against the ~74 GB/s this box achieves at
+best. llama-bench and llama-server agreed to within 1%. There is no efficiency
+bug in the decode path - it is bandwidth-bound and already near optimal, so the
+only way to make it faster is to read fewer bytes.
+
+Bytes per token = every non-expert tensor in full (`token_embd` excepted, it is
+a gather) plus `n_expert_used / n_expert` of the routed experts:
+
+| what | GiB/token | share |
+|---|---|---|
+| `attn_q` + `attn_output` (Q6_K) | 1.916 | **41.6%** |
+| routed experts, 10/256 (IQ2_S + IQ4_XS) | 1.637 | 35.6% |
+| shared experts, attn_k/v, output, router | 1.042 | 22.8% |
+
+**Two tensors cost more per token than all 256 experts combined**, because they
+are read in full every token while any given expert is read 10 times in 256.
+Unsloth's UD mixes protect attention and crush the experts to IQ2_S - correct
+for quality per byte *stored*, wrong for this box, which needs quality per byte
+*read*. Laguna makes it extreme: 72 heads x 128 head_dim on a 3072 hidden is a
+3x expansion, so `attn_q` and `attn_output` are enormous.
+
+## Doing it without round-tripping the experts
+
+`llama-quantize` has no "change these and copy the rest" mode, and
+re-quantizing an imatrix-built IQ2_S expert through f32 would throw away the
+quality the imatrix bought. But it skips a tensor whose target type equals its
+current type, so `deploy/radeon-780m/pin-tensor-types.py` emits a
+`--tensor-type-file` pinning all 527 quantized tensors to what they already
+are, overriding only the 96 attention ones. Everything else is a byte copy.
+
+One llama.cpp change was needed: `llama-quant.cpp` demanded an imatrix for any
+tensor whose *target* type is IQ2_S-class, without checking whether the tensor
+was actually being requantized - so pinning 92 IQ2_S experts to IQ2_S aborted
+the run. Fixed to require an imatrix only when `target_type != tensor->type`.
+An imatrix was built anyway (100 chunks, code corpus) since it improves the
+attention requant; expert coverage came out at 98.8-99.6%, which does not
+matter here because no expert is touched.
+
+## Measured
+
+| variant | attention | size | tg | vs base | PPL (80 chunks, held-out code) |
+|---|---|---|---|---|---|
+| base UD-IQ3_S | Q6_K | 45.10 GiB | 13.77 | — | 2.3658 +/- 0.0339 |
+| V1 | Q5_K | 44.78 GiB | 14.16 | +2.8% | 2.3674 +/- 0.0341 |
+| **V2** | **IQ4_XS** | **44.42 GiB** | **16.08** | **+16.8%** | **2.3660 +/- 0.0339** |
+
+Both passed `check-output.sh` first. **Perplexity is unchanged** - IQ4_XS
+attention costs 0.008%, which is nothing, because model quality here is already
+set by the IQ2_S experts and the Q6_K attention was pure overprovisioning.
+Prefill improves slightly too: pp4096 147.5 -> 151.0, pp512 106.3 -> 111.3.
+
+**Q5_K is the trap.** It saves 328 MiB and should have been +7.5%; it measured
++2.8%. Its 5-bit unpack is split across two planes and is slower per byte on
+this Vulkan backend than the Q6_K it replaced, so most of the byte saving went
+back into dequant. IQ4_XS is a flat 4-bit codebook lookup, is already the type
+used for `ffn_down_exps` in these files, saves twice as much, and hit its
+prediction. **The bytes-per-token model predicts bandwidth, not dequant cost -
+always confirm with llama-bench.**
+
+## The two wins overlap - do not add them up
+
+| config | tg | vs base |
+|---|---|---|
+| base, no drafter | 14.15 | — |
+| base + Q4_K_M drafter, n-max 2 | 16.89 | +19.4% |
+| V2, no drafter | 16.00 | +13.1% |
+| **V2 + Q4_K_M drafter, n-max 2** | **17.00** | **+20.1%** |
+
++13% and +19% compose to +20%, not +35%. The requant cuts the *fixed* bytes of
+a round; the drafter's marginal cost is the *per-verify-token* expert bytes,
+which the requant does not touch. Worse, cutting the fixed cost lowers `T1` and
+so raises the acceptance needed to break even - from ~0.45 to ~0.51 at n-max 2,
+against a measured 0.611. Both are still worth having (V2 is 0.68 GiB smaller
+and free in quality; the drafter is the bigger single win), but the combination
+is where the ceiling is, and on these four prompts V2+drafter is not separable
+from drafter alone.
+
+## Next, untested
+
+Extending IQ4_XS to `attn_k`, `attn_v` and the shared experts (leaving
+`output.weight` and `token_embd` at Q6_K, which are the sensitive ones) removes
+another ~0.20 GiB/token, predicted ~+6% unspeculated. Given attention
+requantization measured free in perplexity, this is likely also free, but it is
+predicted, not measured.
