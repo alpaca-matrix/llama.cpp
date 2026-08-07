@@ -282,7 +282,7 @@ row is linked in the "Detail" column.
 | Qwen3.6-35B-A3B vanilla (official quant) | `fast`/`deep` | downloaded 2026-07-31, desk-rejected | **rejected** | same hybrid-GDN shape as `coder` (10/40 full-attention) — no reason to expect better prefill than the fine-tunes already covering this base | deleted 2026-08-03 |
 | `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-SFT-GPT56Sol-RL-Agent-GGUF` (Q4, 19.06 GiB) | `coder` | 2026-08-03 | **deployed** | beats Coder-Next on every axis, ties `fast` on saturating evals; see "Hard-tier results" below | on disk (`nerkyor-dsv4pro-q4.gguf`) |
 | `nerkyor/Qwen3.6-35B-A3B-APEX-MTP-GGUF` ("I-Balanced", 24.27 GiB) | `fast` (MTP comparison) | 2026-08-04 | **rejected** | class-leading throughput once retuned to n-max=3 (35.6 t/s served, beats `fast`) but hard-reasoning 6/10 with 4 truncations — same non-termination failure that sank Ornith-3.6 and MiniMax-M2.1 | deleted 2026-08-04 |
-| `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill` (Q4_K_M, 20.22 GiB + mmproj) | `fast` -> `nerkyor-eval` | 2026-08-04 | **eval slot, not deployed** | won every standalone eval; first deploy hit two `ErrorDeviceLost` GPU hangs under real opencode traffic within 3 hours live, root-caused to missing `spec-draft-type-k/v` (defaulted to F16) and fixed (`q8_0`, matching Ornith), but the fixed redeploy's ~20 min soak fell short of the ~30 min mark where the first incident hit, so `fast` was reverted to Ornith a second time and this now lives in the temporary `nerkyor-eval` alias pending more production confidence. See "GPU hang incident" / "Second revert" below | on disk (`nerkyor-thinking-distill-q4.gguf` + `-mmproj-F16.gguf`) |
+| `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill` (Q4_K_M, 20.22 GiB + mmproj) | `fast` -> `nerkyor-eval` | 2026-08-04, re-verdicted 2026-08-07 | **eval slot, exonerated** | won every standalone eval; lost `fast` twice on 2026-08-04 to two `ErrorDeviceLost` GPU hangs that were **wrongly attributed to it** - the real cause was amdgpu's 2000 ms compute-ring watchdog, which also hit `coder` (no speculation at all) the day before. Weights were deleted 2026-08-05 on that bad diagnosis and redownloaded 2026-08-07; `nerkyor-eval` slot restored. Owes a real-traffic soak with the watchdog fix in place before it can retake `fast`. See "Root cause, corrected" below | on disk (`nerkyor-Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill-Q4_K_M.gguf` + `-mmproj-F16.gguf`) |
 | `nerkyor/Qwen3.6-27B-DSV4Pro-GLM52-SFT-GPT55-RL-Coding-GGUF` (Q4-LynnStyle, dense) | `coder` | 2026-08-04 | **rejected** | confirmed dense (`qwen35`, zero expert tensors) — 4.1 t/s base, 8.5 t/s even with its own MTP draft sidecar; reproduces this repo's established dense-model rejection a third time | deleted 2026-08-04 |
 
 ### Ornith-Agents-A1-3.6-35B-A3B — rejected 2026-08-01, tested for `fast`
@@ -677,10 +677,10 @@ Ruled out rather than assumed:
 
 | checked | result |
 |---|---|
-| context-length trigger | no — crashed at both ~2k and 67k tokens |
+| context-length trigger | no — crashed at both ~2k and 67k tokens. **WRONG, see "Root cause, corrected" below** - the ~2k figure is tokens *into prompt processing of one request*, on a slot that had been warm for ~30 min and already held a large KV. It is not the context depth, which is what actually matters. Depth was never ruled out; it is the trigger |
 | D-state / stuck process (the known GTT-exhaustion failure mode) | no — `ps aux` clean both times |
 | silent CPU fallback | no — `/v1/models` showed `fast` still `loaded`, GTT/VRAM at normal levels (10.6/17 GiB) afterward |
-| thermal/pre-existing driver flakiness | no — host dmesg shows **zero** `amdgpu` ring timeouts across the ~44 h of uptime before this swap; two in the first 3 h after it |
+| thermal/pre-existing driver flakiness | no — host dmesg shows **zero** `amdgpu` ring timeouts across the ~44 h of uptime before this swap; two in the first 3 h after it. **WRONG, see "Root cause, corrected" below** - `dmesg` reads the kernel ring buffer, which had wrapped. `journalctl -k` on the host shows two timeouts on 2026-08-03 (21:05, 22:08) hitting `coder`, before this swap existed. This single bad observation is what made the incident look model-specific. **Use `journalctl -k`, never `dmesg`, for anything older than the last few hours** |
 | load-time/teardown race (the previously documented `DeviceLost` mode) | no — that mode shows the GPU idle at 0% with a clean allocator failure; both of these hit mid-decode with the GPU actively computing |
 
 This is a fourth, previously undocumented `DeviceLost` signature on this box
@@ -701,7 +701,12 @@ for days across this repo's entire measurement history with no such hang, so
 **reverted `fast` to Ornith** (`router.ini`, `opencode.json`) as the immediate
 fix; Thinking-Distill's weights were kept on disk for further isolation.
 
-##### Root cause and fix — same day, 2026-08-04
+##### Root cause and fix — same day, 2026-08-04 - SUPERSEDED, THIS DIAGNOSIS IS WRONG
+
+> Kept as a record of what was believed at the time and of how the reasoning
+> failed. The actual cause is in "Root cause, corrected" below. The
+> `spec-draft-type-k/v = q8_0` setting this section introduced is worth keeping
+> for the memory it saves, but it did not fix anything.
 
 Reading `common/speculative.cpp`'s MTP implementation
 (`common_speculative_impl_draft_mtp::process()`, around line 1402) shows the
@@ -774,6 +779,59 @@ process, but is not a soak-test in itself - no eval traffic against it holds
 the same evidentiary weight as time live under real opencode usage. Promote it
 back to `fast` only after that gap is closed, not on standalone eval wins
 alone.
+
+##### Root cause, corrected - 2026-08-05/07
+
+Both reverts above were wrong, and so was the retirement that followed them on
+2026-08-05 (weights deleted, ~22 GiB). The hangs had nothing to do with this
+model, its MTP head, or its draft KV type.
+
+**Actual cause: amdgpu's compute-ring watchdog.** This kernel (7.0.14-8-pve)
+defaults `amdgpu.lockup_timeout` to 2000 ms on all four rings - a graphics
+frame deadline. At depth this workload submits flash-attention dispatches that
+run in the high hundreds of ms, and with `sched_hw_submission = 2` a job's
+watchdog starts while its predecessor is still executing, so two consecutive FA
+dispatches share one 2 s budget. The full derivation, including the two
+independent ways the 2 s figure was confirmed, is in `README.md` under
+"ErrorDeviceLost at depth is the compute-ring watchdog".
+
+**Fixed** on the host cmdline with
+`amdgpu.lockup_timeout=10000,60000,10000,10000` (compute to 60 s), applied
+2026-08-05. Result: **zero ring timeouts in the 2 days 3 hours since**, against
+ten in the three days before, on the same workload. Plus a Vulkan-backend
+change (`ggml_vk_queue_submit`) that aborts on device loss instead of serving a
+dead device for 26 minutes.
+
+**Why this model was wrongly convicted.** Two observational errors, both in the
+"Ruled out rather than assumed" table above:
+
+- The claim that the host had **zero** ring timeouts in the 44 h before the
+  swap came from `dmesg`, whose ring buffer had wrapped. `journalctl -k` shows
+  two on 2026-08-03 hitting `coder` - which has no MTP head, no drafter, and no
+  speculation of any kind. That one bad reading is what made a
+  platform-wide fault look model-specific.
+- "Crashed at both ~2k and 67k tokens" treated tokens-into-a-request as
+  context depth. Every incident was in fact deep: `n_tokens` 67160, 106011,
+  115537, 127774.
+
+Once depth is the variable, the F16-draft-KV story stops explaining anything:
+`coder` has no draft context at all.
+
+**Method lesson, and it is the expensive one here.** A plausible mechanism was
+found for a fault whose *scope* had never been established, and a model was
+convicted on it twice and then deleted. The mechanism was real code doing real
+work - MTP's catch-up decode does scale with accumulated context - it just was
+not what was failing. Before attributing a fault to the thing that changed,
+establish whether the fault predates the change; on this box that means
+`journalctl -k` on the **host** (`192.168.254.222`), not `dmesg`, and not the
+LXC journal alone - three of the ten timeouts never reached the LXC at all,
+because a crashed model child does not always get to log.
+
+**Status 2026-08-07:** weights redownloaded, `nerkyor-eval` slot restored, and
+the candidate is back to being judged on the evals it won. What it still owes
+before taking `fast` is unchanged and is now the *only* thing outstanding: a
+real-traffic soak longer than the ~20 min it got, crossing >67k and >100k
+accumulated tokens, with the watchdog fix in place.
 
 #### nerkyor/Qwen3.6-27B-DSV4Pro-GLM52-SFT-GPT55-RL-Coding-GGUF — rejected 2026-08-04, tested for `coder`
 
