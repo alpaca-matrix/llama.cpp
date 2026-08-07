@@ -302,6 +302,18 @@ struct vk_command_pool {
     }
 };
 
+// A lost device is not recoverable here - nothing recreates it, so every later
+// submit throws as well and the exception eventually escapes a noexcept frame
+// and calls std::terminate, long after the submit that actually failed. Abort
+// at the point of failure instead, like the other unrecoverable Vulkan errors.
+static void ggml_vk_queue_submit(vk::Queue& queue, vk::ArrayProxy<const vk::SubmitInfo> submits, vk::Fence fence) {
+    try {
+        queue.submit(submits, fence);
+    } catch (const vk::DeviceLostError& e) {
+        GGML_ABORT("ggml_vulkan: device lost during queue submit (%s)", e.what());
+    }
+}
+
 // Prevent simultaneous submissions to the same queue.
 struct vk_queue_handle {
     vk::Queue queue;
@@ -315,7 +327,7 @@ struct vk_queue_handle_synchronized : vk_queue_handle {
     std::mutex mutex;
     void submit(vk::ArrayProxy<const vk::SubmitInfo> submits, vk::Fence fence) override {
         std::lock_guard<std::mutex> guard(mutex);
-        queue.submit(submits, fence);
+        ggml_vk_queue_submit(queue, submits, fence);
     }
     void lock()   override { mutex.lock(); }
     void unlock() override { mutex.unlock(); }
@@ -324,7 +336,7 @@ struct vk_queue_handle_synchronized : vk_queue_handle {
 struct vk_queue_handle_unsynchronized : vk_queue_handle {
     void submit(vk::ArrayProxy<const vk::SubmitInfo> submits, vk::Fence fence) override {
         // Driver guarantees internal synchronization via VK_KHR_internally_synchronized_queues
-        queue.submit(submits, fence);
+        ggml_vk_queue_submit(queue, submits, fence);
     }
     // lock()/unlock() inherited no-ops
 };
