@@ -1028,6 +1028,14 @@ load-on-startup, not wired to any client; select it with
 `"model": "nerkyor-eval"`. See `router.ini` and `candidates.md` for the full
 incident and fix history before considering it for `fast` again.
 
+A second temporary slot, `kat-eval` (Kwaipilot/KAT-Coder-V2.5-Dev, MTP-grafted
+UD-Q4_K_XL), holds a `coder` candidate: 332.9 t/s / 29.24 t/s served, 4/4, 6/6
+and 7/8 across the three coding tiers with zero edit misses. Its turn counts
+(14 / 20 / 32) are the lowest any model has recorded here, which matters more
+than the tied scores - session latency is turns x per-turn time. Text-only, so
+it cannot replace an alias that needs vision. Same handling as above: not
+load-on-startup, selectable with `"model": "kat-eval"`.
+
 `fast` is the default choice for almost everything: it beats `coder` on every
 published SWE-bench variant while generating 38% faster in half the footprint,
 and it ties `deep` 8/8 on `reason-eval.sh`. `assist` is kept only for its

@@ -1706,3 +1706,176 @@ backend the flat one is worth more than a median 1.5% higher.
 
 The Q4_K_M drafter stays on disk. It is worth +19.4% against the stock file,
 and it is the thing to re-test if a DSpark-headed Laguna drafter ever ships.
+
+---
+
+# KAT-Coder-V2.5-Dev - measured 2026-08-07, `kat-eval`
+
+Kwaipilot/KAT-Coder-V2.5-Dev, 35B total / 3B active, Apache-2.0. Post-trained
+on Qwen/Qwen3.6-35B-A3B, the same base `coder` and `nerkyor-eval` already
+serve, so no part of the architecture is new to this box: arch `qwen35moe`, 256
+routed experts top-8 plus 1 shared, 40 blocks, `full_attention_interval 4` (10
+full-attention layers, 30 Gated Delta Net), context_length 262144. Published
+SWE-bench Verified 69.40 / Multilingual 63.00 - level with `coder`'s
+70.6/62.8, which is to say the published numbers are not the reason to look.
+
+Served file is `gbuzhf/KAT-Coder-V2.5-Dev-MTP-GGUF`, tier `MTP-UD-Q4_K_XL`
+(21.27 GiB), SHA256-verified through `fetch-model.sh`.
+
+**The open weights are text-only.** Kwaipilot stripped the vision tower from
+the release while leaving a `vision_config` in `config.json`; there is no
+mmproj and none can be built. `check-vision-tools.sh` reports `vision FAIL -
+HTTP 500`, which is correct behaviour, not a deployment fault.
+
+## The MTP head is grafted, and it works anyway
+
+KAT ships `mtp_num_hidden_layers: 0` - no draft head. The GGUF above grafts
+Qwen3.6-35B-A3B's *original* MTP head onto KAT's trunk. Measured here it
+accepts 0.76, against 0.85-0.87 for `fast`'s own co-trained head - a real gap
+but nowhere near enough to stop it paying.
+
+Worth recording because it cuts against the Laguna result directly above: the
+publisher fine-tuned this head on KAT's own rollouts twice, at 80 and 450
+steps, and **both fine-tunes made acceptance worse** (0.73 -> 0.45/0.46
+agentic, their measurement). A donor head from the base model beat both
+adaptations of it. The DFlash lesson - that a feature-conditioned drafter is
+coupled to its target - says acceptance must be re-measured after any change to
+the target; it does not say a co-trained head is always available, and when one
+is not, an unmodified donor head from the base model is a better bet than a
+hand-adapted one.
+
+## Sweep - `spec-sweep.sh`, 4 prompts, median of each
+
+| config | tg t/s | acceptance |
+|---|---|---|
+| baseline, no speculation | 22.03 | - |
+| n-max 2, p-min 0 | **29.28** | 0.764 |
+| n-max 2, p-min 0.3 | 29.05 | 0.773 |
+| n-max 2, p-min 0.3, + `ngram-mod` | 29.24 | 0.773 |
+| n-max 3, p-min 0 | 26.63 | 0.607 |
+| n-max 4, p-min 0.3 | 25.41 | 0.576 |
+| n-max 1, p-min 0.75 *(publisher's pick)* | 26.16 | 0.948 |
+| n-max 2, p-min 0.75 | 27.96 | 0.935 |
+
++33% for the head. n-max 2 is the peak, the same MoE draft-length ceiling every
+other alias here hits and for the same reason: each verified token routes to
+its own experts, so verify cost grows with draft length.
+
+Two results are worth carrying forward.
+
+**The publisher's recommended flags are 11% slower here.** They ship
+`--spec-draft-n-max 1 --spec-draft-p-min 0.75 --spec-type draft-mtp,ngram-mod`,
+found by coordinate ascent over 79 live configs - real work, honestly reported,
+and wrong for this box. It was tuned on an RTX 3070 Ti Laptop 8 GB with 35 of
+40 MoE layers on CPU, where (their words) MTP alone is a net loss and
+`ngram-mod` has to carry the win. Here MTP alone is +33%. **Third time vendor
+speculation guidance has failed to transfer** - poolside's n-max 15 for Laguna,
+Qwen's defaults for `fast`, now this. Re-sweep every time; the failure is not
+that vendors are careless, it is that the optimum is a property of the memory
+system, not of the model.
+
+**`ngram-mod` never fired.** Paired with `draft-mtp` it returned acceptance
+byte-identical to `draft-mtp` alone, 714/924, and tg inside the noise. There
+was nothing left for it to cover.
+
+`p-min 0.75` is the clearest illustration of the trap: 0.935 acceptance, and
+4.5% slower than p-min 0.3 at 0.773. Acceptance is not the objective.
+
+## Evals - through the router, alias `kat-eval`
+
+| eval | `kat-eval` | best incumbent |
+|---|---|---|
+| `probe-server.sh` | pp 332.9 t/s, tg 29.24 t/s | `coder` pp 326, tg 26.14 |
+| `check-vision-tools.sh` | tools PASS, vision FAIL (text-only) | - |
+| `code-eval.sh` | 4/4, 78 s, **14 turns**, 2.1K think | `coder` 4/4, 104 s |
+| `code-eval-hard.sh` | 6/6, 180 s, **20 turns** | `fast` 6/6, 163 s, 27 turns |
+| `code-eval-opencode.sh` | 7/8, 213 s, **32 turns**, 4.9K read | `nerkyor-eval` 7/8, 225 s, 47 turns |
+
+Zero edit misses and zero botched tool calls across all 18 items. The single
+failure is `agents-md`, which **every model tested on this box has failed**.
+
+The scores tie; the turn counts do not. 14/20/32 are the lowest recorded here
+against 27-47 for the incumbents - 26% fewer turns than `fast` on the hard tier
+and 32% fewer than `nerkyor-eval` on the opencode tier. Session latency is
+turns x per-turn time, so on the metric that started this whole search ("init
+takes too long") this is the strongest result any candidate has produced.
+Reasoning economy is healthy too: 2.1K/6.0K/4.3K chars, against the 143K that
+disqualified Darwin-36B.
+
+Tool calling works through KAT's `<tool_call><function=name><parameter=x>` XML
+template - a different shape from the JSON-in-`<tool_call>` every other alias
+here uses. llama.cpp's PEG auto-parser (`common/chat-peg-parser.cpp`, the
+`function_opener` marker) handles it and emits a correct OpenAI tool call.
+
+## Tier choice, and the requant this file is asking for
+
+`MTP-UD-IQ4_XS` (16.95 GiB) was measured alongside: 31.69 t/s speculated
+against 29.05 (+9%), pp4096 419 vs 350 (+20%). It was **not** deployed -
+Q4_K_XL keeps routed experts at Q4_K/Q5_K/Q6_K where IQ4_XS drops them to
+IQ3_S/IQ4_XS, this slot exists to judge coding quality, and unlike Laguna there
+is no memory pressure forcing the lower tier.
+
+Both tiers are badly allocated for a bandwidth-bound box, and worse than Laguna
+was. Per-token traffic on the deployed file:
+
+| tensor | GB/token | share | type |
+|---|---|---|---|
+| routed experts | 0.6136 | 22.3% | Q4_K/Q5_K/Q6_K |
+| `output` | 0.5403 | 19.6% | Q8_0 |
+| `attn_qkv` | 0.5348 | 19.4% | Q8_0 |
+| `attn_gate` | 0.2674 | 9.7% | Q8_0 |
+| `ssm_out` | 0.2674 | 9.7% | Q8_0 |
+| `attn_q` | 0.1783 | 6.5% | Q8_0 |
+| `attn_output` | 0.0891 | 3.2% | Q8_0 |
+| shared experts (3) | 0.1338 | 4.8% | Q8_0 |
+| | **2.751 total** | | |
+
+**All 256 routed experts together are 22.3% of the traffic; the Q8_0 non-expert
+tensors are 68%.** Unsloth's Dynamic mixes protect exactly the tensors read in
+full on every single token, which is right for quality-per-byte-stored and
+wrong for tokens-per-second - the same finding as Laguna, on a file whose
+experts are three tiers higher.
+
+The bytes-per-token model predicts 25.4 t/s against 22.02 measured, and 28.1
+against 24.21 for IQ4_XS: a consistent 0.865 correction, i.e. ~60.5 GB/s
+effective rather than the ~70 GB/s dense-attention models reach. The GDN layers
+carry recurrent-state traffic the model does not count. **Use 60.5 GB/s for
+hybrid-attention arithmetic on this box, 70 for the rest.**
+
+Retargeting the Q8_0 non-expert tensors to IQ4_XS via `pin-tensor-types.py`
+predicts 2.751 -> ~1.88 GB/token, or ~32 t/s unspeculated - above even the
+stock IQ4_XS file, while keeping the experts at the higher tier. NOT ATTEMPTED,
+and two things must be settled first:
+
+1. **Perplexity.** Laguna's equivalent requant was free (2.3657 vs 2.3658)
+   *because* its experts were already pinned at IQ2_S, so the Q6_K attention
+   was buying nothing. That argument does not hold here - these experts are at
+   4-6 bits, so the Q8_0 attention may be doing real work. This needs the
+   held-out perplexity run Laguna got, not an assumption.
+2. **Draft acceptance.** The MTP head conditions on the target's hidden states.
+   Requantizing `attn_k`/`attn_v` moved Laguna's DFlash acceptance 0.617 ->
+   0.544 and turned a win into a loss. Expect the same coupling here and
+   re-sweep after; never carry 0.773 across.
+
+The requant and the head may well be substitutes, exactly as they were for
+Laguna. Measure, do not add them up.
+
+## What was deployed
+
+`kat-eval`, UD-Q4_K_XL, `draft-mtp` at n-max 2 / p-min 0.3,
+`spec-draft-type-k/v = q8_0`, ctx 262144, not load-on-startup, listed in
+`opencode.json` but not the default there. Verified loadable standalone at
+262144 first: 17.15 GiB VRAM + 13.63 GiB GTT = 30.78 GiB, well inside the
+76 GiB pool.
+
+p-min 0 and 0.3 tie (29.28 vs 29.05, inside noise). 0.3 is deployed on the same
+reasoning `fast` carries it - verify cost grows with depth, so declining to
+draft on low-confidence steps should be worth more at 100k tokens than in a
+300-token sweep. That is a judgement call, not a measurement.
+
+Before this could take `coder`: everything above was measured at ctx 32768
+while the slot is configured for 262144, and none of it is a real agentic
+session. The `nerkyor-eval` history is the precedent - a candidate that passed
+every standalone eval hung the GPU twice under real opencode traffic. Soak it
+across the depths that mattered there (>67k and >100k accumulated tokens)
+before promoting it.

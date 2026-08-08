@@ -12,6 +12,13 @@
 #   ./spec-sweep.sh /root/models/EVAL-Laguna-S-2.1-UD-IQ3_S.gguf 2 \
 #       /root/models/EVAL-Laguna-S-2.1-DFlash-Q8_0.gguf 0
 #
+# SPEC_TYPE selects the implementation (default draft-dflash, which needs a
+# drafter file). Types that live inside the target file take no drafter:
+#   SPEC_TYPE=draft-mtp ./spec-sweep.sh /root/models/EVAL-KAT-...-MTP.gguf 2 "" 0.3
+# It is a comma-separated list, chained in order, so an n-gram pass can back a
+# model-based one: SPEC_TYPE=draft-mtp,ngram-mod. NGRAM_ARGS passes the
+# --spec-ngram-mod-* knobs through unsplit.
+#
 # Reports served tg, prompt processing, and draft acceptance. Stop the
 # production unit first - a 45 GiB model plus whatever the router holds will
 # not both fit in the pool.
@@ -22,6 +29,8 @@ MODEL="${1:?path to target gguf}"
 NMAX="${2:?draft length, 0 for no speculation}"
 DRAFTER="${3:-}"
 PMIN="${4:-0}"
+SPEC_TYPE="${SPEC_TYPE:-draft-dflash}"
+NGRAM_ARGS="${NGRAM_ARGS:-}"
 
 PORT="${PORT:-8081}"
 CTX="${CTX:-32768}"
@@ -39,15 +48,22 @@ args=(
   --threads 8 --cache-type-k q8_0 --cache-type-v q8_0
   --ctx-size "$CTX" --parallel 1 --jinja --reasoning-format deepseek
 )
-if [ -n "$DRAFTER" ] && [ "$NMAX" != "0" ]; then
+if [ "$NMAX" != "0" ]; then
   args+=(
-    --model-draft "$DRAFTER" --spec-type draft-dflash
+    --spec-type "$SPEC_TYPE"
     --spec-draft-n-max "$NMAX" --spec-draft-p-min "$PMIN"
     --cache-type-k-draft q8_0 --cache-type-v-draft q8_0
   )
+  if [ -n "$DRAFTER" ]; then
+    args+=(--model-draft "$DRAFTER")
+  fi
+  if [ -n "$NGRAM_ARGS" ]; then
+    # shellcheck disable=SC2206
+    args+=($NGRAM_ARGS)
+  fi
 fi
 
-echo "== config: n_max=$NMAX p_min=$PMIN drafter=${DRAFTER:-none}"
+echo "== config: type=$SPEC_TYPE n_max=$NMAX p_min=$PMIN drafter=${DRAFTER:-none}"
 : > "$LOG"
 "$BIN/llama-server" "${args[@]}" >>"$LOG" 2>&1 &
 SERVER_PID=$!
