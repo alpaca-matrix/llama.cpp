@@ -1,0 +1,4 @@
+# Agent memory is local to this working copy and is never committed.
+# Only this file is tracked, so the ignore rule survives a clone of the template.
+*
+!.gitignore
