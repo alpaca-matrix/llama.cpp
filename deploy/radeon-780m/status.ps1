@@ -11,13 +11,17 @@
 #   - amdgpu compute-ring timeouts / ErrorDeviceLost at context depth
 #   - a model still loading when a request arrives (router force-kills it)
 #
-# usage: .\status.ps1 [-Deep] [-Hours 24]
-#   -Deep   also walks /root/models for its on-disk size (several seconds)
-#   -Hours  log-scan window, default 24
+# usage: .\status.ps1 [-Deep] [-Hours 24] [-Watch] [-Interval 5]
+#   -Deep      also walks /root/models for its on-disk size (several seconds)
+#   -Hours     log-scan window, default 24
+#   -Watch     redraw the panel every -Interval seconds until Ctrl+C
+#   -Interval  seconds between refreshes in watch mode, default 5
 [CmdletBinding()]
 param(
     [switch]$Deep,
-    [int]$Hours = 24
+    [int]$Hours = 24,
+    [switch]$Watch,
+    [int]$Interval = 5
 )
 
 $ErrorActionPreference = 'Stop'
@@ -117,6 +121,30 @@ if [ -n "`$first" ]; then
   P slots_total "`$(printf '%s' "`$s" | grep -o '"id":' | wc -l)"
   P slots_busy  "`$(printf '%s' "`$s" | grep -o '"is_processing":true' | wc -l)"
   P slots_ctx   "`$(printf '%s' "`$s" | sed -n 's/.*"n_ctx":\([0-9]*\).*/\1/p')"
+
+  # progress of whichever slot is actually mid-request right now - /slots is a
+  # live snapshot from the task queue, so this is real, not inferred from logs
+  SLOTS_JSON="`$s" python3 <<'PYEOF'
+import json, os
+try:
+    slots = json.loads(os.environ["SLOTS_JSON"])
+except Exception:
+    raise SystemExit
+busy = next((sl for sl in slots if sl.get("is_processing")), None)
+if busy:
+    # next_token comes back as a one-element array, not an object
+    nt = (busy.get("next_token") or [{}])[0]
+    n_decoded = nt.get("n_decoded", 0)
+    phase = "generating" if n_decoded > 0 else "prompt_eval"
+    print("prog_phase=" + phase)
+    print("prog_id_slot=" + str(busy.get("id", "")))
+    print("prog_id_task=" + str(busy.get("id_task", "")))
+    print("prog_n_decoded=" + str(n_decoded))
+    print("prog_n_remain=" + str(nt.get("n_remain", -1)))
+    print("prog_n_prompt_tokens=" + str(busy.get("n_prompt_tokens", 0)))
+    print("prog_n_prompt_tokens_processed=" + str(busy.get("n_prompt_tokens_processed", 0)))
+    print("prog_n_prompt_tokens_cache=" + str(busy.get("n_prompt_tokens_cache", 0)))
+PYEOF
 fi
 
 # One pass over the journal for every log-derived fact. Timestamps come back as
@@ -196,27 +224,31 @@ P last_amdgpu "`$(printf '%s' "`$dm" | grep -iE 'amdgpu.*(timeout|reset|error|fa
 P load "`$(cut -d' ' -f1-3 /proc/loadavg)"
 "@
 
-Write-Host ''
-Write-Host '  probing 192.168.254.250 ...' -ForegroundColor DarkGray -NoNewline
+# Gathers both SSH probes with no console output of its own, so a caller can
+# hold the previous frame on screen for the whole round trip and only touch
+# the display once a complete new set of metrics exists. Returns $null on
+# an unreachable LXC, otherwise @{ L = <hashtable>; H = <hashtable or $null> }.
+function Get-StatusData {
+    $lxcRaw = Invoke-Remote -Target $LxcHost -Script $lxcScript
+    $pveRaw = Invoke-Remote -Target $PveHost -Script $pveScript
 
-$lxcRaw = Invoke-Remote -Target $LxcHost -Script $lxcScript
-$pveRaw = Invoke-Remote -Target $PveHost -Script $pveScript
+    if ($null -eq $lxcRaw) { return $null }
 
-Write-Host "`r                              `r" -NoNewline
-
-if ($null -eq $lxcRaw) {
-    Write-Host '  FAIL  cannot reach the LXC over SSH (192.168.254.250).' -ForegroundColor Red
-    Write-Host '        ICMP can fail on this network while SSH works, so test with ssh, not ping.' -ForegroundColor DarkGray
-    exit 2
+    return @{
+        L = ConvertFrom-KeyValue $lxcRaw
+        H = if ($pveRaw) { ConvertFrom-KeyValue $pveRaw } else { $null }
+    }
 }
 
-$L = ConvertFrom-KeyValue $lxcRaw
-$H = if ($pveRaw) { ConvertFrom-KeyValue $pveRaw } else { $null }
+# Renders one already-gathered snapshot. Returns 0/1/2 (healthy/warnings/failures)
+# so watch mode can flag the same thing a one-shot run would exit with.
+function Show-StatusPanel {
+    param($L, $H)
+
+$script:rows = @()
+$script:actions = @()
 
 # ------------------------------------------------------------------ renderer
-
-$rows = @()
-$actions = @()
 
 function Add-Row {
     param([string]$Name, [string]$State, [string]$Text)
@@ -293,6 +325,27 @@ else {
     }
     else {
         Add-Row 'MODEL' 'OK' "$name resident  |  slot state unavailable (load in flight?)"
+    }
+}
+
+# --- active request progress ------------------------------------------------
+# A live read of /slots, not an inference from logs - if a prompt is really
+# being worked on right now, these counters differ between two runs of this
+# script a few seconds apart.
+if ($L['prog_phase']) {
+    $slotId  = $L['prog_id_slot']
+    $taskId  = $L['prog_id_task']
+    if ($L['prog_phase'] -eq 'prompt_eval') {
+        $procNow  = [int](Get-Num $L['prog_n_prompt_tokens_processed'])
+        $cacheHit = [int](Get-Num $L['prog_n_prompt_tokens_cache'])
+        $kvSoFar  = [int](Get-Num $L['prog_n_prompt_tokens'])
+        Add-Row 'PROGRESS' 'OK' "slot $slotId / task $taskId  |  prompt eval  |  $procNow new tokens processed  |  $cacheHit reused from cache  |  $('{0:N0}' -f $kvSoFar) tokens in KV so far"
+    }
+    else {
+        $decoded = [int](Get-Num $L['prog_n_decoded'])
+        $remain  = [int](Get-Num $L['prog_n_remain'] -1)
+        $remainTxt = if ($remain -ge 0) { "$remain left of budget" } else { 'no n_predict limit' }
+        Add-Row 'PROGRESS' 'OK' "slot $slotId / task $taskId  |  generating  |  $('{0:N0}' -f $decoded) tokens decoded  |  $remainTxt"
     }
 }
 
@@ -491,4 +544,47 @@ else {
 Write-Host ''
 
 # 0 healthy, 1 warnings, 2 failures - so it can gate a scheduled check later
-switch ($worst) { 'FAIL' { exit 2 } 'WARN' { exit 1 } default { exit 0 } }
+switch ($worst) { 'FAIL' { return 2 } 'WARN' { return 1 } default { return 0 } }
+}
+
+# --------------------------------------------------------------------- driver
+
+function Write-Unreachable {
+    Write-Host ''
+    Write-Host '  FAIL  cannot reach the LXC over SSH (192.168.254.250).' -ForegroundColor Red
+    Write-Host '        ICMP can fail on this network while SSH works, so test with ssh, not ping.' -ForegroundColor DarkGray
+}
+
+if ($Watch) {
+    try { [Console]::CursorVisible = $false } catch { }
+    try {
+        while ($true) {
+            # gathered against whatever frame is still on screen - the display
+            # only changes once, atomically, right below
+            $data = Get-StatusData
+
+            Clear-Host
+            if ($null -eq $data) { Write-Unreachable } else { Show-StatusPanel -L $data.L -H $data.H | Out-Null }
+            Write-Host "  watching every ${Interval}s - Ctrl+C to stop" -ForegroundColor DarkGray
+
+            Start-Sleep -Seconds $Interval
+        }
+    }
+    finally {
+        try { [Console]::CursorVisible = $true } catch { }
+        Write-Host ''
+        Write-Host '  stopped watching.' -ForegroundColor DarkGray
+    }
+}
+else {
+    Write-Host ''
+    Write-Host '  probing 192.168.254.250 ...' -ForegroundColor DarkGray -NoNewline
+    $data = Get-StatusData
+    Write-Host "`r                              `r" -NoNewline
+
+    if ($null -eq $data) {
+        Write-Unreachable
+        exit 2
+    }
+    exit (Show-StatusPanel -L $data.L -H $data.H)
+}
