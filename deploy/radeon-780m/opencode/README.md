@@ -67,9 +67,10 @@ cp -r $SRC/opencode-template/.opencode/prompt/.  ~/.config/opencode/prompt/
 cp -r $SRC/opencode-template/.opencode/command/. ~/.config/opencode/command/
 ```
 
-Then merge the `agent` block from `opencode-template/opencode.json` into
-`~/.config/opencode/opencode.json`, repointing each prompt at the global copy,
-and add the `instructions` array:
+That is the whole install. Nothing to merge by hand: the shipped
+[`opencode.json`](opencode.json) already carries the `instructions` array and
+all three agents alongside the provider block, with prompts referenced at their
+global location:
 
 ```json
 {
@@ -85,8 +86,21 @@ and add the `instructions` array:
 }
 ```
 
-`~` is expanded in both `instructions` entries and `{file:...}` references, so
-there is no need to hardcode an absolute home directory.
+`~` is expanded in both `instructions` entries and `{file:...}` references, on
+Windows as well as Linux, so there is no need to hardcode a home directory.
+On Windows `~` is your user profile and opencode's config directory is
+`C:\Users\<you>\.config\opencode` - note `.config`, not `AppData`. Forward
+slashes are fine in the JSON on every platform.
+
+The copy order matters: `opencode.json` references the prompt files, so copy
+the `prompt/` directory too. Command files are discovered by scanning the config
+directory rather than by path reference, so they must sit in
+`~/.config/opencode/command/` itself - a `~` path elsewhere will not pick them
+up.
+
+If you only want the provider and not these agents, delete the `agent` and
+`instructions` keys after copying, or use [Install B](#install-b-per-repo)
+instead.
 
 ### The one asymmetry that makes this work
 
@@ -136,6 +150,109 @@ opencode debug agent claude-style     # run this from inside a project
 alias like `"model": "fast"` parses the alias as a *provider* and yields an
 empty `modelID`, which fails at request time - always use the qualified
 `llama-local/<alias>` form.
+
+### Install A under WSL
+
+WSL adds one trap that will silently waste an afternoon, so check for it before
+following any of the steps above.
+
+**Typing `opencode` inside WSL probably runs the Windows binary.** WSL puts the
+Windows `PATH` on your Linux `PATH`, so a shell with no Linux-native opencode
+still resolves the command - to the `.exe`. It then reads the *Windows* config
+and expands `~` to your Windows profile, which means a config you carefully
+placed in `/home/<user>/.config/opencode/` is never read and nothing appears to
+take effect.
+
+Diagnose it in two commands:
+
+```bash
+command -v opencode          # /mnt/c/... means you are running the Windows binary
+opencode debug paths         # "config  C:\Users\..." confirms it
+```
+
+A native Linux install shows `/usr/local/bin/opencode` and
+`config  /home/<user>/.config/opencode`.
+
+#### Decide which side actually runs opencode
+
+Pick based on **where the repos live**, because crossing the filesystem
+boundary is what hurts:
+
+| Your repos live in | Run opencode from | Install A goes in |
+|---|---|---|
+| Windows (`C:\...`, OneDrive) | Windows | `C:\Users\<you>\.config\opencode\` |
+| WSL (`/home/<user>/...`) | WSL, native install | `/home/<user>/.config/opencode/` |
+| Both | Both, two installs | both, kept in sync from this repo |
+
+Do not mix. Driving a Windows-resident repo from WSL means every file the agent
+reads crosses `/mnt/c`, which is slow enough to matter for an agent doing
+hundreds of reads. Driving a WSL-resident repo from the Windows binary hands it
+a `\\wsl.localhost\...` UNC path, which is slower still and occasionally
+resolves oddly.
+
+This repo lives on the Windows side, so for llama.cpp work the Windows install
+is the right one and WSL adds nothing.
+
+#### Installing opencode natively in WSL
+
+Only if you keep repos inside WSL. Use the install script:
+
+```bash
+curl -fsSL https://opencode.ai/install | bash
+```
+
+**Do not use `npm install -g opencode-ai` from WSL** unless you have installed
+Linux Node first. With only Windows Node on the path, `npm` resolves to
+`/mnt/c/Program Files/nodejs/npm` with prefix `C:\Users\<you>\AppData\Roaming\npm`,
+so it reinstalls the *Windows* binary and leaves you exactly where you started.
+
+Confirm the native binary now wins:
+
+```bash
+command -v opencode          # must NOT start with /mnt/c
+opencode debug paths         # config must be under /home/<user>
+```
+
+`/usr/local/bin` precedes every `/mnt/c` entry on the default WSL path, so a
+binary there shadows the Windows one automatically. If the installer chose a
+different directory, put that directory ahead of the Windows entries in your
+shell profile rather than relying on install order.
+
+#### Then run Install A unchanged
+
+With a native opencode, every command in Install A works verbatim - `~` is
+`/home/<user>`, so `~/.config/opencode/prompt/core.txt` resolves on the Linux
+side. Copy from the Windows checkout through `/mnt/c`:
+
+```bash
+SRC="/mnt/c/Users/<you>/OneDrive/Documents/Personal Folders/Homelab/llama.cpp/deploy/radeon-780m/opencode"
+mkdir -p ~/.config/opencode/prompt ~/.config/opencode/command
+cp    "$SRC/opencode.json"                        ~/.config/opencode/opencode.json
+cp -r "$SRC/opencode-template/.opencode/prompt/."  ~/.config/opencode/prompt/
+cp -r "$SRC/opencode-template/.opencode/command/." ~/.config/opencode/command/
+```
+
+Quote the paths - `Personal Folders` and `OneDrive` contain spaces.
+
+The per-repo memory design needs no change. The relative
+`.opencode/memory/MEMORY.md` entry still resolves against whatever project you
+launch in, WSL-side or not.
+
+#### WSL-specific follow-ups
+
+- **Repeat the global git ignore.** WSL has its own `~/.config/git/ignore`,
+  separate from the Windows one, and a fresh Ubuntu has no such file at all:
+  ```bash
+  mkdir -p ~/.config/git && echo '.opencode/memory/' >> ~/.config/git/ignore
+  ```
+  The agent's self-created `.opencode/memory/.gitignore` covers you either way;
+  this is only belt and braces.
+- **Networking needs nothing.** WSL2 reaches the box on the LAN directly -
+  measured at 16 ms to `192.168.254.250:8080` with no port forwarding or
+  mirrored-mode networking.
+- **Two installs means two configs.** They do not share anything. Keep this
+  directory as the source of truth and re-copy to both sides after editing, or
+  they will drift.
 
 ### Trade-offs
 
@@ -354,3 +471,6 @@ back, the memory path works.
 - `opencode run` does not expand slash commands - they are a TUI feature. To
   check a command is registered, look for it in `opencode debug config` under
   the `command` key rather than trying to invoke it from `run`.
+- Under WSL, `opencode` silently resolves to the Windows binary unless a native
+  Linux one is installed, and then reads the Windows config. Always confirm with
+  `command -v opencode` before concluding a config change had no effect.

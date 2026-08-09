@@ -3,6 +3,36 @@
   "model": "llama-local/fast",
   "small_model": "llama-local/fast",
   "plugin": ["superpowers@git+https://github.com/obra/superpowers.git"],
+  "instructions": [
+    "~/.config/opencode/prompt/core.txt",
+    ".opencode/memory/MEMORY.md"
+  ],
+  "agent": {
+    "claude-style": {
+      "description": "General-purpose, asks before edit/bash",
+      "prompt": "{file:~/.config/opencode/prompt/claude-style.txt}",
+      "model": "llama-local/fast",
+      "permission": { "edit": "ask", "bash": "ask" }
+    },
+    "claude-style-plan": {
+      "description": "Read-only investigation and planning, no execution",
+      "prompt": "{file:~/.config/opencode/prompt/claude-style-plan.txt}",
+      "model": "llama-local/fast",
+      "permission": {
+        "edit": "deny",
+        "bash": { "*": "deny", "git status": "allow", "git diff": "allow", "git log*": "allow", "ls*": "allow", "cat*": "allow", "grep*": "allow" }
+      }
+    },
+    "claude-style-auto": {
+      "description": "High autonomy, edits and safe bash pre-approved",
+      "prompt": "{file:~/.config/opencode/prompt/claude-style-auto.txt}",
+      "model": "llama-local/fast",
+      "permission": {
+        "edit": "allow",
+        "bash": { "*": "allow", "rm -rf*": "deny", "git push --force*": "deny", "git reset --hard*": "deny" }
+      }
+    }
+  },
   "provider": {
     "llama-local": {
       "npm": "@ai-sdk/openai-compatible",
