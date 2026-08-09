@@ -9,7 +9,7 @@
 # window would silently keep using local models. Every variable is saved and
 # restored in the finally block, so `claude` on its own always means Anthropic.
 param(
-    [ValidateSet("fast", "coder", "assist", "deep")]
+    [ValidateSet("fast", "coder", "assist", "deep", "nerkyor-eval", "laguna-eval", "kat-eval")]
     [string]$Model = "fast",
 
     [Parameter(ValueFromRemainingArguments = $true)]
