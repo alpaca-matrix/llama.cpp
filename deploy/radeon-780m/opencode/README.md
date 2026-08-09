@@ -146,10 +146,15 @@ opencode models llama-local
 opencode debug agent claude-style     # run this from inside a project
 ```
 
-`model` should read `{"providerID": "llama-local", "modelID": "fast"}`. A bare
-alias like `"model": "fast"` parses the alias as a *provider* and yields an
-empty `modelID`, which fails at request time - always use the qualified
-`llama-local/<alias>` form.
+The agents carry no `model` of their own and inherit the top-level
+`"model": "llama-local/fast"`, so `debug agent` reports an **empty** model for
+them. That is expected: the field shows an agent's override, not the effective
+model. To see what a session actually uses, start one - the header reads
+`> claude-style . fast`.
+
+Whenever you do write a model reference, use the qualified
+`llama-local/<alias>` form. A bare alias like `"model": "fast"` parses the alias
+as a *provider* and yields an empty `modelID`, which fails at request time.
 
 ### Install A under WSL
 
@@ -304,9 +309,21 @@ opencode run --agent claude-style "fix the failing vulkan test"
 and anything outside the project directory. Autonomy covers routine steps, not
 irreversible ones.
 
-All three point at `llama-local/fast`. Switch a single agent to a different
-alias by editing its `model` field - useful for putting `claude-style-plan` on
-`deep` for architecture work while execution stays on `fast`.
+None of the three declares a model. All inherit the top-level
+`"model": "llama-local/fast"`, so changing that one line moves every agent at
+once - which is what you want when the `fast` alias is repointed at a new
+build.
+
+To pin one agent to a different alias, add a `model` to just that agent - useful
+for putting `claude-style-plan` on `deep` for architecture work while execution
+stays on `fast`:
+
+```json
+"claude-style-plan": { "model": "llama-local/deep", "...": "..." }
+```
+
+Do that sparingly. The server runs `models-max = 1`, so every switch between
+aliases inside one session costs a 14-31 s model swap.
 
 ## How the prompts compose
 
