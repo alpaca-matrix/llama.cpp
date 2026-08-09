@@ -75,9 +75,9 @@ anything claiming to beat it, not another 10/10.
 
 | # | model | arch | total/active | quant+size+bpw | experts | full-attn layers | MTP/drafter | est. tg range | verdict |
 |---|---|---|---|---|---|---|---|---|---|
-| 1 | Qwen3.5-122B-A10B | `qwen35moe` | 122B/10B | UD-IQ4_XS, 57.7 GiB, 4.06 bpw | 256 (top-8) | 12 of 48 (GDN hybrid, interval 4) | native MTP, confirmed in-tree | **8.5-11.6 t/s w/ MTP** (6.6-8.0 base) | interesting, not yet worth downloading blind |
-| 2 | Nemotron 3 Super 120B-A12B | `nemotron_h_moe` | 120B/12B | UD-Q2_K_XL, 50.9 GiB, 3.64 bpw | unclear (Latent MoE, count unpublished) | few (mostly Mamba-2, small number of attn blocks) | native MTP claimed | **~7-12 t/s w/ MTP**, wide error bars | insufficient evidence — watch |
-| — | Ling-3.0-flash | (unknown, unreleased) | 124B/5.1B | no GGUF | ? | ? | ? | ? | not released — API only, watch for GGUF |
+| 1 | Ling-3.0-flash | `bailingmoe3` | 124B/5.1B | IQ3_XXS, 47.7 GiB, 3.30 bpw | 512 (top-8) + 1 shared | **7 of 42** (35 KDA linear + 7 MLA) | native MTP, bundled in every GGUF | **~21-27 t/s w/ MTP** (16-20 base) | strongest `deep` candidate found - but **arch is in no shipping llama.cpp** and tool calling is broken in the open PR; do not download yet |
+| 2 | Qwen3.5-122B-A10B | `qwen35moe` | 122B/10B | UD-IQ4_XS, 57.7 GiB, 4.06 bpw | 256 (top-8) | 12 of 48 (GDN hybrid, interval 4) | native MTP, confirmed in-tree | **8.5-11.6 t/s w/ MTP** (6.6-8.0 base) | interesting, not yet worth downloading blind |
+| 3 | Nemotron 3 Super 120B-A12B | `nemotron_h_moe` | 120B/12B | UD-Q2_K_XL, 50.9 GiB, 3.64 bpw | unclear (Latent MoE, count unpublished) | few (mostly Mamba-2, small number of attn blocks) | native MTP claimed | **~7-12 t/s w/ MTP**, wide error bars | insufficient evidence — watch |
 | — | MiniMax-M2.7 | `minimax-m2` | 229B/10B | UD-Q3-class, ~55-60 GiB | 256 (top-8) | **62 of 62** | DFlash now published | n/a | reject — same 62/62 depth collapse as M2.1, unchanged |
 | — | Laguna S 2.1 | `laguna` | 118B/8B | smallest ~49 GiB (4-bit) | ? | ? | official DFlash | n/a | reject — wrong slot (coding-agent, not reasoning) and too tight against pool |
 | — | GLM-4.7-Flash | `glm4moe` | 30B-A3B | — | — | — | declared, unconfirmed fixed | n/a | already tested/rejected on this box (`failed to create MTP context`); no material fix found |
@@ -86,7 +86,148 @@ anything claiming to beat it, not another 10/10.
 
 ---
 
-## 1. Qwen3.5-122B-A10B — the one candidate worth a closer look
+## 1. Ling-3.0-flash - released, and the strongest `deep` candidate so far
+
+Released under MIT since this file last recorded it as "still not released", so
+that verdict is retired. Target slot is `deep`, not `fast`: 5.1B active is the
+same count gpt-oss-120b carries, and the predicted throughput lands on top of
+the incumbent's.
+
+**Everything in this section is research and arithmetic. Nothing here is
+measured on this box** - the arch does not load here yet, see the blockers.
+
+### What it is, from `config.json`
+
+`model_type: bailing_hybrid`, GGUF arch tag `bailingmoe3`.
+
+| field | value |
+|---|---|
+| total / active | 124B / 5.1B |
+| layers | 42 - **35 KDA + 7 gated MLA**, 5:1 alternating |
+| experts | **512 routed top-8** + 1 shared, `moe_intermediate_size` 768 |
+| hidden / vocab | 2560 / 157,184 |
+| attention | Kimi Delta Attention (linear) + MLA, `kv_lora_rank` 512 |
+| context | `max_position_embeddings` 262144, `rope_scaling: null` - native, no YaRN |
+| MTP | `num_nextn_predict_layers: 1`, bundled in every GGUF |
+| license | MIT |
+
+### Which tier fits the 76 GiB pool
+
+Publisher sizes are GB (10^9), converted to GiB against the pool.
+
+| tier | GB | GiB | bpw | verdict |
+|---|---|---|---|---|
+| UD-Q2_K_XL | 43.4 | 40.4 | 2.80 | below this repo's 3-bpw floor |
+| **IQ3_XXS** | **51.2** | **47.7** | **3.30** | **the pick** - same bpw as Laguna's IQ3_S |
+| Q3_K_M | 62.6 | 58.3 | 4.04 | fits, ~10 GiB margin |
+| MXFP4_MOE | 69.8 | 65.0 | 4.50 | too tight |
+| Q4_K_S and up | 73.9+ | 68.8+ | - | exceeds |
+
+IQ3_XXS at 47.7 GiB is **smaller than `deep` is today** (59.0 GiB).
+
+### Predicted 16-20 t/s base, ~21-27 with MTP
+
+Two independent methods agree, which is why this is a range and not a point.
+
+Decomposing active params from `config.json`: ~1.89B routed experts (8/512 of
+~120B), ~2.79B non-expert of which **KDA projections alone are ~1.93B**, and
+~0.40B `token_embd`. That sums to 5.08B against the published 5.1B, which is
+what makes the decomposition trustworthy enough to build on. At IQ3_XXS with
+non-expert tensors protected at Q6_K/Q8_0 - which is what the publishers say
+they do - that is **3.0-3.7 GB/token**, and at the 60.5 GB/s hybrid-attention
+correction factor, **16-20 t/s**.
+
+The `tg_ceiling` formula at the top of this file lands in the same place: 5.1B
+x 0.4125 B/param = 2.10 GB, ceiling 35.2 t/s, x the 0.45 realized band (512
+experts plus hybrid attention is exactly the worst band, the one `coder` sits
+in) = 15.9 t/s.
+
+Against `deep`'s measured 19.6 t/s that is a wash, and well below `fast` (35.1)
+or `kat-eval` (29.2).
+
+### Three properties that make it worth tracking
+
+**1. The best depth profile of anything evaluated here.** Only 7 of 42 layers
+carry a KV cache at all, and those 7 are MLA (`kv_lora_rank` 512 + 64 rope =
+576 per token per layer). The full 262144 context at q8_0 is about **1.1 GB**
+of KV; the 35 KDA layers carry fixed-size recurrent state, ~73 MB per sequence.
+The MiniMax-M2.1 failure mode that killed it here (-65% tg by d32768) is
+structurally impossible on this layer pattern.
+
+**2. The `pin-tensor-types.py` lever applies, harder than it did to Laguna.**
+About 60% of non-embedding per-token bytes are non-expert, and the publishers
+explicitly keep "KDA projections at higher precision". Retargeting those ~1.93B
+params Q8_0 -> IQ4_XS is roughly a 27% cut in bytes per token, predicting
+**~+38% tg** - the same play that took Laguna 13.77 -> 16.95. Note the caveat
+recorded there: it worked because the mix was lopsided. This one looks lopsided
+in the same direction, but that is a prediction, not a result.
+
+**3. It clears `deep`'s harder-discriminator bar on published numbers.**
+
+| benchmark | Ling-3.0-flash | best incumbent |
+|---|---|---|
+| GPQA-D | 85.0 | - |
+| SWE-bench Pro | 56.6 | `fast` 50.4 |
+| SWE-bench Multilingual | 72.4 | `fast` 69.3 |
+| LiveCodeBench v5 | 82.8 | - |
+| AIME 2026 | 93.2 | - |
+| SWE-bench Verified | **not published** | `fast` 75.6 |
+
+Per the `deep` bar above, another 10/10 on `reason-eval-hard.sh` cannot rank a
+replacement - a harder discriminator has to be the argument. GPQA-D 85.0 and
+SWE-bench Pro 56.6 are that argument.
+
+### ...and four blockers, in severity order
+
+**1. The arch does not exist in any shipping llama.cpp.** This tree has
+`LLM_ARCH_BAILINGMOE` and `LLM_ARCH_BAILINGMOE2`, not `bailingmoe3`. Neither
+does upstream master - a code search of `ggml-org/llama.cpp` returns zero hits.
+Support is PR #26608 (`ggml-org/llama.cpp`), **OPEN** as of 2026-08-09: created
+2026-08-05, 850 additions across 17 files, awaiting 2 of 3 code-owner
+approvals, CPU-only for graph construction. Both GGUF publishers require a
+non-upstream build - AtomicChat a "TurboQuant" build, bloomer010 the
+`aetherbird/llama.cpp` fork. AtomicChat's card claims bailingmoe3 "is in
+upstream llama.cpp"; **that claim is false**, and it is the kind of card
+assertion this file has been burned by before.
+
+**2. Tool calling is broken in the PR.** Multi-argument function calls fail:
+the first argument's value swallows the remaining arguments as a literal
+string. For this box that is disqualifying on its own, independent of every
+other number here.
+
+**3. Reported Vulkan freezes, and "MTP cannot be disabled without crashes."**
+The hard op is *not* missing - this tree already ships Vulkan gated-delta-net
+kernels with explicit KDA variants (`ggml/src/ggml-vulkan/ggml-vulkan.cpp`,
+`gated_delta_net_f32_d128_kda`), which is why `kimi-linear.cpp` works. But an
+untested arch on an unmerged PR with open Vulkan freeze reports is precisely
+the shape that has cost this box two hard power cycles of pve2.
+
+**4. The tier that fits is the hardest possible quant case.** 3.30 bpw with 512
+experts of 5.9M params each. Laguna's IQ3_S was accepted only as an eval slot,
+and only because its mix was lopsided enough to fix.
+
+### One open question the config cannot settle
+
+`mtp_loss_scaling_factor: 0`. If that means the MTP head carried no loss term
+in final training, acceptance may be poor and the entire speculation upside
+evaporates. The record here is split: KAT's *grafted* donor head accepted 0.76,
+while GLM-4.7-Flash's declared-but-missing nextn tensors failed outright.
+**Measure acceptance first** - that single number decides whether this is a
+16 t/s model or a 27 t/s one, and it is cheap to get.
+
+### Verdict
+
+Do not download yet. Two things have to close first: PR #26608 merging, and the
+multi-argument tool-calling bug. That PR is four days old and moving, not
+stalled - re-check in 2-4 weeks.
+
+When it clears, the path is `IQ3_XXS` into a `ling-eval` slot with
+`load-on-startup = false`, verified standalone on port 8081 before it touches
+`router.ini`, with MTP acceptance as the first measurement taken.
+
+---
+
+## 2. Qwen3.5-122B-A10B — the one candidate worth a closer look
 
 Repo: `unsloth/Qwen3.5-122B-A10B-MTP-GGUF` (dedicated MTP-carrying repo,
 distinct from the plain `unsloth/Qwen3.5-122B-A10B-GGUF`). Arch
@@ -198,7 +339,7 @@ header read, no full download needed) to confirm the nextn block is actually
 present in UD-IQ4_XS before committing 57.7 GiB, given GLM-4.7-Flash's exact
 failure mode was a declared-but-absent MTP block.
 
-## 2. Nemotron 3 Super 120B-A12B — insufficient evidence, not a real candidate yet
+## 3. Nemotron 3 Super 120B-A12B — insufficient evidence, not a real candidate yet
 
 `unsloth/NVIDIA-Nemotron-3-Super-120B-A12B-GGUF`, arch `nemotron_h_moe`
 (confirmed present in `src/llama-arch.cpp`, `LLM_ARCH_NEMOTRON_H_MOE`). Hybrid
@@ -225,17 +366,6 @@ at key depths" should give excellent depth scaling, similar in spirit to
 Watch this one; do not act on it without the config and at least one
 independent benchmark number.
 
-## 3. Ling-3.0-flash — still not released
-
-124B total / 5.1B active — notably the same active-param count as gpt-oss.
-Ant Group's 2026-07-27 announcement offers a free API through 2026-08-03 (one
-day from today) with weights promised to open-source afterward. As of
-2026-08-02 there are still no Hugging Face weights, no GitHub repo, no GGUF,
-and no license statement — identical status to the 2026-08-01 rejection.
-Revisit in the next few days; if the active-param match holds and weights land
-in a supportable quant, this is worth a fast look given the near-identical
-bandwidth profile to the incumbent.
-
 ---
 
 ## Rejected at research time, with reasons
@@ -247,8 +377,8 @@ bandwidth profile to the incumbent.
 | GLM-4.7-Flash | Already tested and rejected on this box (`failed to create MTP context`, declared-but-missing nextn tensors). Searched for a fix; found only an unrelated Jan-2026 scoring-function bug fix, no confirmation the MTP tensor gap was addressed. Not re-tested. |
 | Kimi K3 | Correction to the prior entry: arch **is now supported** in this tree (`LLM_ARCH_KIMI_LINEAR`, confirmed in `src/llama-arch.cpp`), so the earlier "no kimi_k3 arch" rejection reason is stale. Still fails on size alone — even the 1-bit Unsloth dynamic GGUF is ~594 GB, ~8x the pool. |
 | Step-3.5-Flash (`step35`, 196B/11B) | Carried forward from the 2026-08-01 shortlist unresolved, where it was ranked for `coder`, not `deep`. Still untested. Its blocking gate is unchanged: IQ2_S is 69.2 GiB against a 76 GiB pool, leaving ~6.8 GiB for KV at 131072, and its estimated 11-18 t/s lands at or below the slot it would replace. Not re-evaluated in this deep-focused sweep — arch `LLM_ARCH_STEP35` is present in this tree. |
-| Ling-3.0-flash | Weights not released — see above, unchanged from 2026-08-01 modulo an imminent open-source date. |
-| Nemotron 3 Super | See section 2 — not rejected outright, but insufficient independently-verified evidence to shortlist; gated config, uncorroborated benchmark. |
+| Ling-3.0-flash | **No longer rejected - see section 1.** Weights released under MIT; it is now the top-ranked `deep` candidate, blocked on arch support rather than on merit. |
+| Nemotron 3 Super | See section 3 — not rejected outright, but insufficient independently-verified evidence to shortlist; gated config, uncorroborated benchmark. |
 | Hy3 (Tencent, `hy_v3`, 295B/21B) | Exceeds pool. Unchanged from 2026-08-01. |
 | DeepSeek-V4-Flash (`deepseek4`, 284B/13B) | Exceeds pool, smallest quant 82.5 GB verified. Unchanged. |
 | GLM-4.7 full (355B) | Exceeds pool. Unchanged. |
