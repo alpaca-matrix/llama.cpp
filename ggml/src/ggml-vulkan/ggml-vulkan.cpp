@@ -783,6 +783,7 @@ struct vk_device_struct {
     bool add_rms_fusion;
     uint32_t partials_binding_alignment;
     uint32_t max_nodes_per_submit;
+    uint32_t mul_mat_vec_id_max_cols;
 
     bool shader_64b_indexing;
 
@@ -6199,6 +6200,16 @@ static vk_device ggml_vk_get_device(size_t idx) {
             device->max_nodes_per_submit = std::max(max_nodes_per_submit, 1u);
         }
 
+        // MUL_MAT_ID uses the matvec path up to this many columns and the matrix path
+        // above it. The columns are the whole batch, so concurrent server slots and
+        // speculative draft tokens both spend from it - see ggml_vk_use_mul_mat_vec_id.
+        device->mul_mat_vec_id_max_cols = 8;
+        const char* GGML_VK_MUL_MAT_VEC_ID_MAX_COLS = getenv("GGML_VK_MUL_MAT_VEC_ID_MAX_COLS");
+        if (GGML_VK_MUL_MAT_VEC_ID_MAX_COLS != nullptr) {
+            uint32_t mul_mat_vec_id_max_cols = std::stoul(GGML_VK_MUL_MAT_VEC_ID_MAX_COLS);
+            device->mul_mat_vec_id_max_cols = std::max(mul_mat_vec_id_max_cols, 1u);
+        }
+
         const bool force_disable_f16 = getenv("GGML_VK_DISABLE_F16") != nullptr;
 
         device->fp16 = !force_disable_f16 && fp16_storage && fp16_compute;
@@ -10376,11 +10387,11 @@ static void ggml_vk_mul_mat_vec_id_q_f16(ggml_backend_vk_context * ctx, vk_conte
     }
 }
 
-static bool ggml_vk_use_mul_mat_vec_id(const struct ggml_cgraph * cgraph, int node_idx) {
+static bool ggml_vk_use_mul_mat_vec_id(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx) {
     ggml_tensor * dst = cgraph->nodes[node_idx];
     ggml_tensor * src0 = dst->src[0];
     ggml_tensor * src2 = dst->src[2];
-    return (src2->ne[1] <= 8) && (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16 || ggml_is_quantized(src0->type));
+    return (src2->ne[1] <= ctx->device->mul_mat_vec_id_max_cols) && (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16 || ggml_is_quantized(src0->type));
 }
 
 static void ggml_vk_mul_mat_id(ggml_backend_vk_context * ctx, vk_context& subctx, const struct ggml_cgraph * cgraph, int node_idx) {
@@ -10389,7 +10400,7 @@ static void ggml_vk_mul_mat_id(ggml_backend_vk_context * ctx, vk_context& subctx
     ggml_tensor * src1 = dst->src[1];
     ggml_tensor * src2 = dst->src[2];
     VK_LOG_DEBUG("ggml_vk_mul_mat_id(" << src0 << ", " << src1 << ", " << src2 << ", " << dst << ")");
-    if (ggml_vk_use_mul_mat_vec_id(cgraph, node_idx)) {
+    if (ggml_vk_use_mul_mat_vec_id(ctx, cgraph, node_idx)) {
         ggml_vk_mul_mat_vec_id_q_f16(ctx, subctx, cgraph, node_idx);
     } else {
         ggml_vk_mul_mat_id_q_f16(ctx, subctx, src0, src1, src2, dst);
@@ -16097,7 +16108,7 @@ static bool ggml_vk_can_fuse(const ggml_backend_vk_context * ctx, const struct g
             return false;
         }
         // mat-vec only
-        if (!ggml_vk_use_mul_mat_vec_id(cgraph, node_idx)) {
+        if (!ggml_vk_use_mul_mat_vec_id(ctx, cgraph, node_idx)) {
             return false;
         }
         // shaders assume the types match
@@ -16132,7 +16143,7 @@ static bool ggml_vk_can_fuse(const ggml_backend_vk_context * ctx, const struct g
             return false;
         }
         // mat-vec only
-        if (!ggml_vk_use_mul_mat_vec_id(cgraph, node_idx)) {
+        if (!ggml_vk_use_mul_mat_vec_id(ctx, cgraph, node_idx)) {
             return false;
         }
         // shaders assume the types match
