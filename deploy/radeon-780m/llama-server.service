@@ -15,6 +15,14 @@ RestartSec=5
 LimitMEMLOCK=infinity
 LimitNOFILE=65536
 
+# MUL_MAT_ID stays on the Vulkan matvec path up to this many columns (upstream
+# default 8). Columns are the whole decode batch, so at parallel = 3 the
+# speculating aliases sit at 12 (`fast`), 9 (`kat-eval`) and 15 (`nerkyor-eval`)
+# and would otherwise fall to the matrix path whenever every slot is busy.
+# Worth ~2-3% there and nothing anywhere else - one and two streams are at 4 and
+# 8 columns, already under the default. Measured 2026-08-11, see README.
+Environment="GGML_VK_MUL_MAT_VEC_ID_MAX_COLS=12"
+
 # the router spawns a child per model that holds the GPU allocation. Killing it
 # mid-decode leaves it unkillable in D state with the whole GTT pool pinned,
 # which forces every later Vulkan init to fall back to CPU. Give the children

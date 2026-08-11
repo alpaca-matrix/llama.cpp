@@ -374,12 +374,32 @@ GGML_VK_MUL_MAT_VEC_ID_MAX_COLS=<n>     # default 8, upstream behaviour
 
 An env var rather than an edit because the right value has to be swept and each
 rebuild on this box costs a restart, which is the operation with the incident
-history. **The value is not yet measured.** One data point exists, from the n-max
-8 test above: at 9 columns the matvec path wins by 9%. Nothing is known between
-9 and 128, and the two paths must cross somewhere in there, because the matvec
-cost is linear in columns while the matrix path amortizes. Sweep 8/12/16/24/32
-against the real 3-slot batch shape before pinning it in the systemd unit, and
-do not assume 32 is safe just because it recovered the 9-column case.
+history.
+
+**Measured 2026-08-11, and it is worth ~2-3%, not 9%.** `12` is deployed in the
+systemd unit. Two independent harnesses agree, and the effect is much smaller
+than the n-max 8 data point suggested:
+
+| harness | conc | cols 8 | cols 12 | cols 16 |
+|---|---|---|---|---|
+| spec-sweep (short prompts) | 3 | 29.96 / 29.77 | 30.82 | 30.81 |
+| conc-probe (2641-tok source file) | 3 | 15.17 | 16.48 | - |
+
+Three things that measurement establishes beyond the headline number:
+
+- **`12` and `16` are identical** (30.82 / 30.81). That is the mechanism
+  confirming itself: three slots at n-max 3 produce exactly 12 columns, so no
+  value above 12 is reachable and nothing above it can matter.
+- **Most of the apparent conc-3 gain is session drift, not the knob.** The
+  conc-probe pair looks like +8.6%, but the conc-1 control - 4 columns, where
+  the knob CANNOT apply - moved +6.2% across the same two sessions. Subtracting
+  the control leaves ~2.4%, which matches spec-sweep's +2.9% on much tighter
+  variance (0.6% between repeats). Always run conc 1 as a control here.
+- **It is moot below three streams.** One and two streams are 4 and 8 columns,
+  both already under the default 8.
+
+Do not raise it past 12 on this lineup, and re-derive it from
+`n_slots x (1 + n_max)` if either changes.
 
 ### Watch for silent CPU fallback
 
@@ -1169,6 +1189,51 @@ Also worth knowing: claude-local alone will not use the extra slots. It pins
 `tool_concurrency` and `max_concurrent_subagents` to 1 and sets
 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, so it holds one request in flight. The
 third slot is for the second client, not for making a single session faster.
+
+**Concurrency here SHARES throughput, it does not add any (measured
+2026-08-11).** This is the result to set expectations by. Production-shaped
+requests, `fast` at its deployed config, aggregate tokens over wall clock:
+
+| streams | aggregate t/s | per-stream tg |
+|---|---|---|
+| 1 | 15.37 | 30.09 |
+| 2 | 15.40 | 15.03 |
+| 3 | 15.17 | 9.60 |
+
+Aggregate is flat to within noise while per-stream falls as almost exactly
+`1/n`. The box is bandwidth-saturated by a single stream, so a second client
+does not get free capacity - it takes half of the first client's. That is still
+the right trade for the case this was built for, because the alternative is a
+second client queueing behind a whole agent turn, but it is fair-sharing rather
+than added capacity, and `parallel = 3` buys nothing at all for one client.
+
+Cross-check on single-stream production before and after the change:
+347.2 pp / 35.13 tg -> 347.5 pp / 35.22 tg. The extra slots cost nothing when
+idle; they cost ~1.6 GiB of recurrent state (13.2 -> 14.9 GiB GTT).
+
+**The optimal draft length is regime-dependent, and `n-max 3` is the
+single-stream answer, not the concurrent one.** Same harness, `fast`, per-stream
+tg:
+
+| streams | n-max 3 | n-max 1 |
+|---|---|---|
+| 1 | 31.82 | 30.56 |
+| 2 | 15.03 | 18.17 |
+| 3 | 10.86 | 12.92 |
+
+`n-max 1` costs ~4% alone and returns ~20% whenever a second client is live,
+which puts break-even near 17% of wall-clock spent multi-stream. `n-max 3` is
+deployed because this box is single-stream most of the time; revisit the moment
+that stops being true. Note this does NOT contradict the "draft length 3 is the
+peak" measurement in `[fast]` - that was measured single-stream, where it still
+holds.
+
+**Do not tune draft length on `spec-sweep.sh`'s built-in prompts.** They are
+short and synthetic and return acceptance 0.61 where a real 2641-token source
+file returns 0.85. On those prompts `n-max 1` looked like a flat +25% win at
+conc 3; at production acceptance the same comparison is +19% concurrent and -4%
+single-stream. Draft-length economics are dominated by acceptance, so measure
+with `probe-server.sh`-shaped input before changing `spec-draft-n-max`.
 
 Measured with an 11k-token prompt interleaved with a small request: 9k of 11k
 tokens restored from cache. Generation on code: 32 t/s (MTP unaffected by the
