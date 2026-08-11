@@ -1221,12 +1221,34 @@ tg:
 | 2 | 15.03 | 18.17 |
 | 3 | 10.86 | 12.92 |
 
-`n-max 1` costs ~4% alone and returns ~20% whenever a second client is live,
-which puts break-even near 17% of wall-clock spent multi-stream. `n-max 3` is
-deployed because this box is single-stream most of the time; revisit the moment
-that stops being true. Note this does NOT contradict the "draft length 3 is the
-peak" measurement in `[fast]` - that was measured single-stream, where it still
-holds.
+That table is on synthetic prompts and it is wrong - see the warning below.
+**Re-measured with real prompts through the production router, `n-max 2` is the
+answer for two clients and it is deployed (2026-08-11):**
+
+| n-max | 1 stream tg | 2 streams tg | 2 streams aggregate |
+|---|---|---|---|
+| 2 | 33.97 | 18.55-19.23 | 17.64-17.70 |
+| 3 | 35.59 | 17.68 | 16.49 |
+
+A trade, not a free win: -4.6% at one stream for +8.8% at two, break-even
+around 35% of wall clock spent at two streams. `p-min 0.3` was re-swept at the
+new draft length and is still the peak (0 -> 18.47, 0.3 -> 18.67, 0.5 -> 17.10,
+0.75 -> 17.53 on the spare port); 0.75 buys acceptance 0.949 nobody needed.
+
+**Two harness traps, both of which produced a wrong answer here.** The first
+cost nothing because it was caught; assume the next one will not be.
+
+1. *Synthetic prompts invert the verdict.* `spec-sweep.sh`'s built-in prompts
+   return acceptance 0.61 where a real source file returns 0.85. On them
+   `n-max 1` looked like a flat +25% win at three streams and +21% at two. With
+   `PROMPT_FILE` set, `n-max 1` is not even the peak - `n-max 2` is. Acceptance
+   0.857 at one stream is the tell that the harness is reproducing production,
+   since that matches the 0.85-0.87 this alias has always documented.
+2. *The spare port does not reproduce single-stream production.* At ctx 32768
+   without `cache-ram`, `n-max 2` and `3` measured 34.05 vs 33.88 - a tie. On
+   the real router at ctx 262144 they are 33.97 vs 35.59, a 4.6% regression the
+   sweep could not see. Sweep on the spare port, then **confirm the winner on
+   8080 before deploying it.**
 
 **Do not tune draft length on `spec-sweep.sh`'s built-in prompts.** They are
 short and synthetic and return acceptance 0.61 where a real 2641-token source
