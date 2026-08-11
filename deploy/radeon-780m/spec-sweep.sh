@@ -28,6 +28,13 @@
 #   CONC=3 SPEC_TYPE=draft-mtp ./spec-sweep.sh /root/models/...MTP.gguf 3 "" 0.3
 #   GGML_VK_MUL_MAT_VEC_ID_MAX_COLS=16 CONC=3 ... (env passes to the child)
 #
+# PROMPT_FILE replaces the four built-in prompts with windows of a real file.
+# REQUIRED for draft-length and p-min work - the built-ins return acceptance
+# 0.61 where a real source file returns 0.85, which inverts the verdict. See the
+# note above the prompt list:
+#
+#   PROMPT_FILE=/root/llama.cpp/src/llama-context.cpp CONC=2 ./spec-sweep.sh ...
+#
 # Reports per-stream tg, aggregate tg, prompt processing, and draft acceptance.
 # Aggregate is the number that matters at CONC > 1: per-stream tg falls as slots
 # are added even when total throughput rises. Stop the production unit first - a
@@ -113,7 +120,7 @@ if ! grep -q 'llama_server: listening' "$LOG"; then
 fi
 echo " up"
 
-PORT="$PORT" NPREDICT="$NPREDICT" CONC="$CONC" python3 <<'PYEOF'
+PORT="$PORT" NPREDICT="$NPREDICT" CONC="$CONC" PROMPT_FILE="${PROMPT_FILE:-}" python3 <<'PYEOF'
 import json, os, statistics, threading, time, urllib.request
 
 port, npredict = os.environ["PORT"], int(os.environ["NPREDICT"])
@@ -128,6 +135,22 @@ prompts = [
     "Implement a thread-safe LRU cache in C++17 with a fixed capacity. Provide the header and a short usage example.",
     "Refactor this shell script to be POSIX-compliant and add error handling:\n\nfor f in *.txt; do\n  cat $f | grep foo >> out\ndone",
 ]
+
+# ...and those four are WRONG for tuning draft length. Measured 2026-08-11 they
+# return MTP acceptance 0.61 where a real 2641-token source file returns 0.85,
+# and draft-length economics are dominated by acceptance: on these prompts
+# n-max 1 looked like a flat +25% win over n-max 3 at three streams, while at
+# production acceptance the same comparison is a trade (+19% concurrent, -4%
+# single-stream). Point PROMPT_FILE at a real file for any spec-draft-n-max or
+# p-min work. Each stream gets its own window of it, so streams stay
+# independent rather than being N copies of one prefix.
+prompt_file = os.environ.get("PROMPT_FILE") or ""
+if prompt_file:
+    text = open(prompt_file).read()
+    prompts = [text[i * 9000:(i + 1) * 9000] for i in range(4)]
+    if not all(prompts):
+        raise SystemExit(f"PROMPT_FILE {prompt_file} is too short - need 36000 chars")
+print(f"   prompts: {'file ' + prompt_file if prompt_file else 'built-in synthetic (NOT for draft-length work)'}")
 
 def run(prompt):
     body = json.dumps({
