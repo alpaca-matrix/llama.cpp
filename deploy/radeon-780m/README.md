@@ -34,7 +34,7 @@ Ranked by measured effect:
 | `ubatch-size = 2048` (retune after Mesa change) | +10-20% on long prompts |
 | KV cache `q8_0` | +5-7% generation, half the KV memory |
 | `ttm.pages_limit` raise | unlocks models >39 GiB |
-| `parallel = 2` + `kv-unified` + `cache-ram` | keeps agent prefix cached across interleaved requests |
+| `parallel = 3` + `kv-unified` + `cache-ram` | keeps agent prefix cached across interleaved requests; third slot added 2026-08-11 for a second independent client |
 | `spec-draft-p-min = 0.3` on `fast` | +2% generation; acceptance 0.82 -> 0.85-0.87 (see fast-opt-plan notes below) |
 | `spec-draft-type-k/v = q8_0` on `fast` | 0% speed, halves the MTP draft KV; kept for the memory |
 
@@ -53,7 +53,7 @@ Do not spend time on these; all measured zero or negative on this hardware.
 | `power_dpm_force_performance_level=high` (host) | 0-1% - auto DPM already ramps fully under load |
 | `ctx-checkpoints` / `checkpoint-min-step` tuning | not needed - identical-prefix restore reprocesses ~15 tok |
 | Vulkan: add an RDNA3 entry to `gpu_pipeline_configs` | tg flat, pp -2% |
-| Vulkan: raise the `mul_mat_id` vector-path threshold | no gain at our draft length (see below) |
+| ~~Vulkan: raise the `mul_mat_id` vector-path threshold~~ | **REOPENED 2026-08-11** - rejected while the batch size was ours to choose, which stops being true at `parallel = 3`. Now a runtime knob, `GGML_VK_MUL_MAT_VEC_ID_MAX_COLS`; value still to be measured. See "MoE vector-path threshold" |
 | `models-max = 2` to co-resident two models | OOM-killed under load (see below) |
 | Qwen3-Next-80B-A3B-Thinking as `deep` | less accurate and slower than gpt-oss-120b |
 | Ternary-Bonsai-27B (Q2_0_g128) | will not load - needs the vendor fork, kernels are CUDA/Metal only |
@@ -355,6 +355,31 @@ and only improves past n=128. A 9-token speculative batch therefore crosses into
 the matrix path, which is why `spec-draft-n-max = 8` regressed. Raising the
 threshold to 32 does recover that case (19.5 -> 21.3 t/s at n-max 8), but n-max 4
 stays faster than either, so the change buys nothing at the draft length we run.
+
+**...which stops being true at `parallel = 3` (2026-08-11).** That rejection
+assumed the column count was ours to choose. It is not, once more than one slot
+generates at a time: `server-context.cpp` puts every generating slot's sampled
+token and its entire draft into one shared batch, so the columns `MUL_MAT_ID`
+sees are `n_active_slots x (1 + n_draft)`, and no draft-length setting can hold
+that under 8 while three slots are busy. At `parallel = 3` the aliases sit at 12
+(`fast`), 9 (`kat-eval`) and 15 (`nerkyor-eval`) - all on the matrix path, all
+the time, which is the same cliff that cost n-max 8 its 9%.
+
+So the threshold is now a runtime knob rather than a constant, following the
+`GGML_VK_MAX_NODES_PER_SUBMIT` pattern:
+
+```sh
+GGML_VK_MUL_MAT_VEC_ID_MAX_COLS=<n>     # default 8, upstream behaviour
+```
+
+An env var rather than an edit because the right value has to be swept and each
+rebuild on this box costs a restart, which is the operation with the incident
+history. **The value is not yet measured.** One data point exists, from the n-max
+8 test above: at 9 columns the matvec path wins by 9%. Nothing is known between
+9 and 128, and the two paths must cross somewhere in there, because the matvec
+cost is linear in columns while the matrix path amortizes. Sweep 8/12/16/24/32
+against the real 3-slot batch shape before pinning it in the systemd unit, and
+do not assume 32 is safe just because it recovered the 9-column case.
 
 ### Watch for silent CPU fallback
 
@@ -1115,9 +1140,35 @@ Agent clients interleave one large growing conversation with small background
 requests (title generation, summarization). With a single slot those evict the
 main prefix and every turn reprocesses the full context. Three settings fix it:
 
-- `parallel = 2` - background requests land on the second slot
-- `kv-unified = true` - both slots share the full ctx-size pool instead of splitting it
+- `parallel = 3` - background requests land on a second slot; the third is for a
+  second independent client (see below)
+- `kv-unified = true` - all slots share the full ctx-size pool instead of splitting it
 - `cache-ram = 16384` - displaced prefixes restore from RAM instead of reprocessing
+
+### Two clients at once (2026-08-11)
+
+`parallel = 3` is what lets a second consumer - Hermes Agent, say - work against
+the model a claude-local session already has resident. Two constraints decide
+whether that is fast or pathological:
+
+**Both clients must name the SAME alias.** `--models-max 1` means one model is
+resident; naming a second alias evicts the first, per turn, forever. `assist` is
+described elsewhere in this file as the Hermes slot, and that is only true when
+nothing else is running - `fast` carries vision too, so point Hermes at whatever
+alias the session holds rather than at `assist`. Evicting a model that is still
+loading is what produced the 2026-08-09 retry storm and, in a worse variant, the
+D-state deadlock that needed a hard power cycle.
+
+**The ctx pool is shared, not per-slot.** `kv-unified` means the sum of all live
+conversations has to fit inside `ctx-size`, so two agents can hold ~130k each at
+262144, not 262144 each. The tell that you have crossed it is slot displacement
+and full reprefills in `journalctl -u llama-server`; `cache-ram` softens that but
+does not remove it.
+
+Also worth knowing: claude-local alone will not use the extra slots. It pins
+`tool_concurrency` and `max_concurrent_subagents` to 1 and sets
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, so it holds one request in flight. The
+third slot is for the second client, not for making a single session faster.
 
 Measured with an 11k-token prompt interleaved with a small request: 9k of 11k
 tokens restored from cache. Generation on code: 32 t/s (MTP unaffected by the
