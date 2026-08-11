@@ -75,7 +75,7 @@ anything claiming to beat it, not another 10/10.
 
 | # | model | arch | total/active | quant+size+bpw | experts | full-attn layers | MTP/drafter | est. tg range | verdict |
 |---|---|---|---|---|---|---|---|---|---|
-| 1 | Ling-3.0-flash | `bailingmoe3` | 124B/5.1B | IQ3_XXS, 47.7 GiB, 3.30 bpw | 512 (top-8) + 1 shared | **7 of 42** (35 KDA linear + 7 MLA) | native MTP, bundled in every GGUF | **~21-27 t/s w/ MTP** (16-20 base) | strongest `deep` candidate found - but **arch is in no shipping llama.cpp** and tool calling is broken in the open PR; do not download yet |
+| 1 | Ling-3.0-flash | `bailingmoe3` | 124B/5.1B | IQ3_XXS, 47.7 GiB, 3.30 bpw | 512 (top-8) + 1 shared | **7 of 42** (35 KDA linear + 7 MLA) | native MTP, bundled in every GGUF | **~21-27 t/s w/ MTP** (16-20 base) | strongest `deep` candidate found - but **arch is in no shipping llama.cpp**; do not download yet. **Re-checked 2026-08-11:** tool calling now fixed, but the Vulkan freezes are on Strix Halo (this box's GPU family) and are the binding blocker - see the 2026-08-11 section at the end |
 | 2 | Qwen3.5-122B-A10B | `qwen35moe` | 122B/10B | UD-IQ4_XS, 57.7 GiB, 4.06 bpw | 256 (top-8) | 12 of 48 (GDN hybrid, interval 4) | native MTP, confirmed in-tree | **8.5-11.6 t/s w/ MTP** (6.6-8.0 base) | interesting, not yet worth downloading blind |
 | 3 | Nemotron 3 Super 120B-A12B | `nemotron_h_moe` | 120B/12B | UD-Q2_K_XL, 50.9 GiB, 3.64 bpw | unclear (Latent MoE, count unpublished) | few (mostly Mamba-2, small number of attn blocks) | native MTP claimed | **~7-12 t/s w/ MTP**, wide error bars | insufficient evidence — watch |
 | — | MiniMax-M2.7 | `minimax-m2` | 229B/10B | UD-Q3-class, ~55-60 GiB | 256 (top-8) | **62 of 62** | DFlash now published | n/a | reject — same 62/62 depth collapse as M2.1, unchanged |
@@ -224,6 +224,14 @@ stalled - re-check in 2-4 weeks.
 When it clears, the path is `IQ3_XXS` into a `ling-eval` slot with
 `load-on-startup = false`, verified standalone on port 8081 before it touches
 `router.ini`, with MTP acceptance as the first measurement taken.
+
+> **Re-checked 2026-08-11 - verdict holds, but the reasons moved.** The
+> tool-calling blocker is fixed; the Vulkan one turned out to be reported on
+> AMD Strix Halo, the nearest hardware sibling to this box, and is now the
+> binding blocker rather than a generic risk. Every GGUF published before
+> 2026-08-07 is also missing the SwiGLU clamp metadata. See "Ling-3.0-flash
+> re-check, and Muse Glimmer - research 2026-08-11" at the end of this file
+> before acting on anything in this section.
 
 ---
 
@@ -1049,7 +1057,7 @@ does the candidate below become relevant.
 
 | # | model | arch | total/active | quant+size+bpw | experts | full-attn layers | MTP/drafter | throughput | verdict |
 |---|---|---|---|---|---|---|---|---|---|
-| 1 | `fast` (already deployed) | `qwen35moe` family | 35B/3B | Ornith-1.0-35B MTP-APEX, 21.9 GiB | 256 (top-8) | 41 of 41 | in-model MTP, wired | pp 343.8 -> 111.3, tg 25.3 -> 17.9 (**measured**) | **re-route here first — no download** |
+| 1 | `fast` (already deployed) | `qwen35moe` family | 35B/3B | Ornith-1.0-35B MTP-APEX, 21.9 GiB | 256 (top-8) | 10 of 40 (GDN, interval 4) + MTP head — **corrected 2026-08-11, was "41 of 41"** | in-model MTP, wired | pp 343.8 -> 111.3, tg 25.3 -> 17.9 (**measured**) | **re-route here first — no download** |
 | 2 | Qwen3-Coder-30B-A3B-Instruct | `qwen3moe` | 30.5B/3.3B | UD-Q4_K_XL, 16.45 GiB, 4.63 bpw | 128 (top-8) | 48 of 48 | DFlash exists, **no GGUF** | est. pp d0 350-425; tg d0 21-27, d65536 11-18 | narrow test only, if a dedicated slot is still wanted |
 | — | Qwen3.6-35B-A3B (vanilla) | `qwen35moe` | 35B/3B | — | 256 (top-8) | 10 of 40 (GDN, interval 4) | — | n/a | reject — same hybrid shape as `coder`, no reason to expect better prefill |
 | — | GLM-4.5-Air | `glm4moe` | 106B/12B | — | — | — | — | ceiling ~12 t/s | reject — 12B active fails the ceiling check on the exact axis being fixed |
@@ -2009,3 +2017,260 @@ session. The `nerkyor-eval` history is the precedent - a candidate that passed
 every standalone eval hung the GPU twice under real opencode traffic. Soak it
 across the depths that mattered there (>67k and >100k accumulated tokens)
 before promoting it.
+
+---
+
+# Requantizing Ornith - measured 2026-08-11, a closed avenue
+
+Not a model candidate: the Laguna byte-budget rewrite above, applied to `fast`.
+Three results, one a correction to this file and one contradicting what the
+Laguna section established.
+
+Triggered by asking whether a higher-quality Ornith variant exists. Off the
+shelf, no. The deployed file is byte-exact with SC117's **I-Quality** tier
+(23,514,742,112 bytes), the top of the four APEX mixes - the local filename says
+`Q6_K` but it is an adaptive mix, not a uniform Q6_K. The official
+`deepreinforce-ai` and `unsloth` ladders go higher (Q8_0, UD-Q8_K_XL) but carry
+**no MTP head**; SC117 grafts one in from Qwen3.5-35B-A3B, so those tiers trade
+the 25.3 -> 34.6 speculation win for a fidelity gain that turns out not to
+exist. The rest of the Ornith 1.0 family is 9B dense, 31B dense and 397B MoE:
+too small, dense (three prior rejections on this box), and past the pool.
+
+That left building one. SC117 also ships `Ornith-1.0-35B-MTP-BF16.gguf`
+(71,066,994,112 bytes, MTP head included) - the only route to a higher-precision
+Ornith, since requantizing upward from the deployed file recovers nothing.
+
+## Correction: `fast` is a GDN hybrid, not 41 of 41 full-attention
+
+Confirmed from the GGUF's own tensors. 30 of the 41 blocks carry `ssm_*`
+(`ssm_out`, `ssm_conv1d`, `ssm_a`, `ssm_dt.bias`, `ssm_norm`) and a fused
+`attn_qkv`; only blocks 3, 7, 11 ... 39, plus block 40 (the MTP head), carry
+separate `attn_q`/`attn_k`/`attn_v`. That is **10 of 40 at interval 4 plus the
+head**, with `qwen35moe.ssm.state_size = 128`.
+
+Two consequences. The bytes-per-token arithmetic for `fast` takes the **60.5
+GB/s hybrid constant, not 70**: 2.339 GB/token predicts 25.9 t/s against 25.3
+measured, where 70 GB/s would have predicted 29.9. And the desk-rejection of
+Qwen3.6-35B-A3B vanilla for being "the same hybrid shape as `coder`, no reason
+to expect better prefill" rests on a distinction that does not exist - `fast`
+has that exact shape and prefills at pp4096 334.
+
+## The incumbent is 0.26% from its own BF16 weights
+
+`llama-perplexity`, 80 chunks, `-c 512`, held-out code corpus (text past byte
+offset 12000 in 151 files, disjoint from the imatrix corpus):
+
+| model | disk | PPL | vs BF16 |
+|---|---|---|---|
+| BF16 source | 66.20 GiB | 2.0131 +/- 0.02495 | - |
+| **APEX I-Quality (deployed)** | 21.89 GiB | **2.0183** +/- 0.02510 | **+0.26%** |
+| row-3 build (below) | 26.95 GiB | 2.0215 +/- 0.02509 | +0.42% |
+
+The deltas sit inside the individual error bars, but these are paired runs over
+identical chunks and the ordering never flips once converged: across chunks
+20-80 the incumbent reads worse than BF16 at 61 of 61 points, and row 3 worse
+than the incumbent at 61 of 61. Cumulative values are autocorrelated, so that is
+one persistent signal rather than 61 trials - the *sign* is solid, the magnitude
+is 0.005. A p-value is not recoverable from 4-decimal logs, since reconstructing
+per-chunk NLL amplifies rounding by a factor of n.
+
+**This bounds every future requant of this model.** The whole distance from the
+deployed file to its own unquantized weights is 0.26%; no mix can buy more than
+that. Quantization is not a quality lever on `fast` - a real upgrade has to be
+different weights.
+
+## IQ4_XS on GDN projections returns a quarter of its prediction
+
+The Laguna play, applied here as "row 3": experts raised from the APEX mix
+(4.25/5.5/6.5625, 5.14 bpw avg) to uniform Q6_K, paid for by dropping the 90
+GDN-block projections (`attn_qkv`, `attn_gate`, `ssm_out` - 0.825 GB/token at
+Q6_K) to IQ4_XS. Built from BF16 with a 443-tensor `--tensor-type-file` and a
+fresh BF16-derived imatrix (200 chunks, code corpus, expert coverage 99.61%).
+Passed `check-output.sh`. 2.227 GB/token against 2.339 predicts **+7.5%**.
+
+Both benched back to back on build `8eef506`, `bench.sh` defaults:
+
+| test | incumbent 21.89 GiB | row 3 26.95 GiB | delta |
+|---|---|---|---|
+| pp512 | 299.49 +/- 9.92 | 319.09 +/- 0.89 | +6.5%, but the incumbent's error bar is 9.92 |
+| pp4096 | 334.08 +/- 0.20 | 330.33 +/- 0.41 | -1.1% |
+| pp16384 | 295.57 +/- 0.65 | 267.29 +/- 0.69 | **-9.6%** |
+| tg128 | 25.36 +/- 0.01 | 25.86 +/- 0.22 | **+2.0%** |
+| tg128 @ d16384 | 23.12 +/- 0.02 | 23.54 +/- 0.01 | +1.8% |
+| tg128 @ d32768 | 21.12 +/- 0.06 | 21.60 +/- 0.06 | +2.3% |
+
+**+2.0% of a predicted +7.5%, and 9.6% of prefill at depth given away.** The
+Laguna section concluded IQ4_XS "hit its prediction" while Q5_K was the trap.
+That holds for ordinary attention tensors and does **not** transfer to a GDN
+hybrid's `attn_qkv`/`attn_gate`/`ssm_out`. The dequant-cost caveat recorded
+there is the right frame, but IQ4_XS is not automatically on its safe side - the
+tensor's role matters, not only its type.
+
+## Verdict: reject row 3, and stop requantizing this model
+
+Worse perplexity than the incumbent, 9.6% less prefill at depth, +5.06 GiB, for
++2.0% generation. The MTP `n-max`/`p-min` sweep and the reason/code/vision evals
+were not run: speculation cannot recover a fidelity regression, and the
+candidate had already lost on two axes.
+
+Both files deleted 2026-08-11, 94 GB reclaimed. Kept:
+`/root/models/ornith-row3.imatrix.gguf` (184 MiB, BF16-derived, 200 chunks) so
+the 41-minute server outage it cost need not be repeated, plus
+`/root/emit-ornith-row3-types.py` and `/root/ornith-row3-types.txt`.
+`router.ini` was never modified and `fast` served the incumbent throughout,
+except during the imatrix window.
+
+One mechanical note for any future build from an unquantized source:
+`pin-tensor-types.py` does **not** work from BF16. It pins each tensor to the
+type it already has and skips anything not already Q/IQ, so from a BF16 file it
+emits an empty map. The quantizable name set has to come from an existing quant
+of the same model - which is what `emit-ornith-row3-types.py` does, taking the
+names from the APEX file and assigning targets by rule.
+
+---
+
+# Ling-3.0-flash re-check, and Muse Glimmer - research 2026-08-11
+
+**Nothing in this section is measured on this box.** Both entries are research
+and arithmetic against published metadata. Neither model has been downloaded.
+
+## Ling-3.0-flash - two blockers closed, one is worse than recorded
+
+Re-check of section 1 at the top of this file, triggered at the 2-4 week mark it
+set for itself.
+
+| blocker, as written 2026-08-02 | status 2026-08-11 |
+|---|---|
+| 1. arch in no shipping llama.cpp | **unchanged** - PR #26608 still OPEN, awaiting 2 of 3 code-owner approvals (JohannesGaessler, CISC, ggerganov). Not in upstream master, not in this tree. |
+| 2. multi-argument tool calling broken | **closed** - `common: fix Bailing V3 tool argument parsing`, 2026-08-07, landed with regression tests |
+| 3. Vulkan freezes, MTP cannot be disabled | **worse** - see below. No commit addresses either. |
+| 4. IQ3_XXS is the hardest quant case | unchanged |
+
+The PR is moving, not stalled: 2026-08-05 speculative decoding, 08-06 SwiGLU
+clamp, 08-07 the tool-call fix, 08-09 metadata writer, 08-11 a master merge plus
+Q-LoRA support for Ling-3.0-tiny and a "small mtp change".
+
+### Blocker 3 is more specific than this file recorded, and points at us
+
+The Vulkan freeze reports are on **AMD Strix Halo** - gfx1151, RDNA 3.5, the
+same radv/amdgpu path this box runs on gfx1103. Section 1 filed this as generic
+"untested arch on an unmerged PR" risk. It is not generic. It is the nearest
+hardware sibling to this box, and it is the configuration that hangs.
+
+Compounding it: "MTP cannot be disabled without crashes" is still unaddressed,
+so speculation cannot be turned off to separate a Vulkan hang from an MTP bug.
+That is the first diagnostic step this box would take, and it is unavailable.
+The precedent for why that matters is the 2026-08-04 `ErrorDeviceLost`
+incident - two reverts and a weight deletion on a wrong diagnosis, settled only
+by finding a case (`coder`) that had no speculation at all to rule it out.
+
+### New: every GGUF published before 2026-08-07 is wrong
+
+All Ling-3.0-flash GGUFs were re-uploaded 2026-08-07 to carry Ling 3.0's trained
+per-layer SwiGLU clamp metadata. Anything pulled earlier needs a re-download or
+`add-ling3-clamp-metadata.py`. Check the file date before spending 47.7 GiB, and
+before attributing any quality result to the quant tier.
+
+### Verdict unchanged: do not download
+
+Half of the download-blocking condition set on 2026-08-02 is now met. Hold on
+the other half. Re-check in 2-4 weeks (early September 2026) for **the merge and
+a Vulkan fix**, not the merge alone - blocker 3 has become the binding one.
+
+## Muse Glimmer 30B - it would load, and it is dense
+
+Meta, Apache-2.0, released with day-0 llama.cpp support: PR #26841 is **merged
+upstream**. GGUF arch tag `muse-glimmer`, `model_type: muse_glimmer`. It is
+**not in this tree** - this fork has not pulled that master commit - so the cost
+of support is a rebase on upstream, not a cherry-pick of an unmerged branch.
+That is the one axis on which it is far ahead of Ling.
+
+### It is dense, and that settles the slot question
+
+`config.json` carries no expert fields of any kind: 2B frozen ViT plus a **28B
+dense** text decoder, 52 layers, hidden 6656, 32 heads / 2 KV heads,
+`sliding_window` 2048, `max_position_embeddings` 131072, vocab 202048.
+
+Dense means the whole file is read every token. There is no active-parameter
+discount, and no `pin-tensor-types.py` lever either, because there are no expert
+tensors sitting idle to leave alone - every byte is hot on every token.
+
+Meta's own GGUF is 16.8 GB:
+
+```
+ceiling = 74 GB/s / 16.8 GB = 4.4 t/s
+```
+
+Calibrated against this box's one *measured* dense datapoint - the nerkyor
+Qwen3.6-27B dense Q4 at 4.1 t/s base, which realized ~0.85 of its own ceiling
+because dense carries no routing overhead - that predicts **3.7-4.0 t/s base**.
+
+For speculation, use Meta's Apple Silicon figure and not its RTX 5090 figure:
+the card claims ~3x on a 5090 but **1.5-1.8x on Apple Silicon**, and Apple
+Silicon is unified-memory and bandwidth-bound, which is this box's regime. That
+predicts **~6-7 t/s served**, against `deep` 19.6, `laguna-eval` 16.75, `coder`
+26.1, `kat-eval` 29.1 and `fast` 34.6. It would be the slowest thing here by
+roughly 3x. This is the fourth dense rejection on this box.
+
+### Everything else about it is right, which is why it is recorded rather than desk-rejected
+
+Official artifacts (`meta-models/Muse-Glimmer-30B-GGUF`):
+
+| file | size | note |
+|---|---|---|
+| `muse-glimmer-30B-kquant-17gb.gguf` | 16.8 GB | primary |
+| `muse-glimmer-30B-kquant-dynamic.gguf` | 19.7 GB | higher-quality variant |
+| `mmproj-kquant.gguf` | 1.4 GB | vision |
+| `dflash-kquant.gguf` | 1.6 GB | DFlash drafter, **already quantized** |
+
+The drafter shipping pre-quantized matters here specifically: the Laguna section
+above established that a BF16 drafter eats the entire speculation win, because a
+drafter's weights are read in full on every draft round exactly like the
+target's. At 1.6 GB against a 16.8 GB target that tax is ~10%, the healthy end
+of that finding rather than the trap.
+
+Published benchmarks - these do clear the `deep` bar's "harder discriminator"
+requirement, which is why throughput has to be the reason for the reject:
+
+| benchmark | Muse Glimmer | best incumbent |
+|---|---|---|
+| SWE-bench Verified | 76.0 | `fast` 75.6 |
+| SWE-bench Pro | 51.2 | `fast` 50.4 |
+| GPQA Diamond | 83.5 | gpt-oss-120b 80.9 |
+| Terminal-Bench 2.1 | 51.7 | - |
+| AIME 2026 | 94.7 | - |
+| MMMU Pro | 74 | - |
+
+Depth profile is excellent: three sliding-window (2048) layers to one full
+attention, so only **13 of 52** layers carry a growing KV, with GQA at 32:2. At
+q8_0 and 131072 that is roughly 1.5 GiB, the 39 windowed layers capping out
+around 70 MB in total. Weights plus mmproj plus drafter plus KV is about 21 GiB
+of the 76 GiB pool. The MiniMax-M2.1 depth collapse is structurally impossible
+on this layer pattern.
+
+### Open items, if it is ever tested anyway
+
+- Meta's announcement says context 32768, while `config.json` says
+  `max_position_embeddings` 131072 and both GGUF cards say "131072+".
+  Unresolved - read it from the GGUF with `gguf_dump.py` before configuring a
+  slot, do not trust any of the three.
+- Nothing published on reasoning-token economy, the axis that has rejected four
+  candidates on this box.
+- The 2-bit tiers that would speed it up (10.7-12.4 GB) fall below this repo's
+  3-bpw floor.
+- `--jinja` is mandatory per Meta, and do not stop on `<|eom|>`.
+
+### Verdict: reject on throughput, but it is the cheapest experiment this file has ever proposed
+
+Rejected for any production slot. ~6-7 t/s is 3x slower than the slowest alias,
+and dense offers no lever to recover it - not quantization, not tensor pinning,
+and speculation is already priced in above.
+
+One caveat against that reject, recorded because it is unusual. It is the
+cheapest candidate this file has evaluated: ~21 GiB total, arch already
+upstream, official pre-quantized drafter and mmproj, Apache-2.0, no fork build,
+no unmerged PR. And it is the first dense candidate whose published quality
+would justify a slot if speed were not the issue. If a download is ever spent on
+it, the point is to replace a fourth *extrapolation* of the dense penalty with a
+measurement. Expect ~6 t/s, and do not wire it into `router.ini` on the
+benchmarks above.
