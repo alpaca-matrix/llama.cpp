@@ -219,7 +219,7 @@ pp512 must be exactly flat.
 
 - llama-bench pp512/tg64 at d0 and d32768 vs the README depth-sweep baseline.
 - probe-server.sh fast 3: served tg + acceptance vs 34.6 t/s / 0.83 baseline.
-- One real Claude Code session against the box (claude-local.ps1 fast) to
+- One real Claude Code session against the box (claude-local -Model fast) to
   confirm tools, streaming and prefix-cache restore are unchanged.
 
 ## Critical files
