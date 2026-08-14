@@ -48,6 +48,23 @@ Costs nothing and rejects most candidates.
 | vision | mmproj published? | absent, if the target alias serves screenshots |
 | full-attention layers | `full_attention_interval` in upstream config.json | all layers full-attn - see MiniMax-M2.1, -65% by d32768 |
 
+**Answer all of the above from the GGUF header, without downloading weights.**
+The KV block and tensor table sit at the front of the file, so a range request
+for the first 50 MB carries arch, block count, expert count, context length,
+tokenizer and vocab size, the chat template, and every tensor name:
+
+```sh
+curl -sL -r 0-52428800 -o /tmp/head.gguf \
+  "https://huggingface.co/<repo>/resolve/main/<file>.gguf"
+strings /tmp/head.gguf | grep -o 'blk\.[0-9]*\.nextn[a-z_.]*' | sort -u   # MTP head
+strings /tmp/head.gguf | grep -o '^blk\.[0-9]*\.' | grep -o '[0-9]*' | sort -n | tail -1
+```
+
+50 MB answers the questions that decide whether to spend 30 GB. Used
+2026-08-15 on three candidates: it found two of them had their MTP head dropped
+in conversion, which set the whole session's expectations before a byte of
+weights was fetched. Do this before every fetch.
+
 **Throughput estimate.** `tg_ceiling = bandwidth / (active_params x bytes_per_param)`,
 using **60.5 GB/s for a GDN hybrid** and 70 GB/s otherwise. Realised fraction
 lands 0.45-0.75. This sets a ceiling, never a forecast: TD's Q6 tier was
@@ -105,6 +122,18 @@ on 2026-08-07.
 > from the same source deserves the same scepticism. Check for a block beyond
 > `block_count - 1` in `gguf_dump.py --no-tensors`, and check the repo listing
 > for an mmproj, before believing any capability claim in this repo's own docs.
+
+> **Confirm "no MTP head" positively, not by absence.** Point spec-sweep at the
+> file with `SPEC_TYPE=draft-mtp` and a non-zero n-max: if there is no head the
+> server refuses and dies during load, which is a positive result rather than an
+> inference from a tensor scan that might have missed something. Costs one
+> failed load. Used on both non-speculating candidates 2026-08-15.
+>
+> **A dropped MTP head is a real failure mode of third-party conversions.** Two
+> of the three candidates that day came from upstream models that HAVE a native
+> MTP head and shipped GGUFs without it - in one case the very head SC117 grafts
+> onto Ornith to make `fast` speculate. It silently costs ~27% of generation and
+> neither repo card mentions it.
 
 Vendor defaults and other models' values do not transfer. Three vendors have
 now shipped a wrong `n-max` for this hardware, and the same model at a different
@@ -246,7 +275,19 @@ That distinction reversed a conclusion on 2026-08-14: TD-Q6 "beating" Ornith was
 
 **Perplexity is bit-reproducible here** (unlike generation), so an incumbent's
 run can be reused across sessions rather than repeated. Verify by re-running it
-once - it should match to four decimals.
+once - it should match to four decimals. Verified 2026-08-15: `fast` re-measured
+2.0183 +/- 0.02510 and `balanced` 2.0079, matching their recorded figures across
+eleven days, a `parallel` change and a rebuilt binary, and the `balanced` vs
+`fast` pairing re-derived independently as the same 51/61 with one flip.
+
+> **Perplexity can INVERT capability, not merely fail to predict it.** On
+> 2026-08-15 the candidate with the best perplexity ever measured on this box -
+> 2.0069, lower than `fast` at 61 of 61 paired chunks, the strongest form this
+> test has - scored **5/10 with 5 truncations** on `reason-eval-hard`, the worst
+> result ever recorded here. It was also the fastest model ever measured here.
+> A candidate that arrives with a perplexity argument and no `reason-eval-hard`
+> number has said nothing at all. Never let step 7 promote anything; it is a
+> tie-breaker and a tier check, never evidence of capability.
 
 **Cross-model requires an identical tokenizer**; check `tokenizer.ggml.model`
 and the token count. And note the corpus is public source, so contamination is
@@ -310,6 +351,15 @@ Distinguish the signatures:
   `/slots` to show zero processing, then stop the server.
 - **Check the backend column says Vulkan**, not CPU. Silent CPU fallback costs
   6x and looks like a bad model.
+- **Do not trust the scripts' "server is busy" guard.** `/slots` answers HTTP
+  400 in router mode and `probe-server.sh` pipes the check through `grep -c`,
+  so the 400 becomes a count of 0 and it reports "not busy" no matter what the
+  server is doing. That guard has been inoperative for as long as this box has
+  run in router mode (found 2026-08-15). Confirm idleness yourself.
+- **Do not wait on `pgrep -f <pattern>`** when the waiter's own command line can
+  contain the pattern - it matches itself and waits forever. Cost 20 minutes on
+  2026-08-15, and a stale process from an earlier session was found spinning on
+  the identical bug. Wait on a marker file or a completion line in a log.
 - **After any run**: no stray spare-port servers, no D-state processes, GTT back
   to the production baseline, repo and `/etc/llama` identical, production alias
   resident.

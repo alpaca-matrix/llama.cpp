@@ -422,6 +422,9 @@ row is linked in the "Detail" column.
 | `nerkyor/Qwen3.6-35B-A3B-APEX-MTP-GGUF` ("I-Balanced", 24.27 GiB) | `fast` (MTP comparison) | 2026-08-04 | **rejected** | class-leading throughput once retuned to n-max=3 (35.6 t/s served, beats `fast`) but hard-reasoning 6/10 with 4 truncations — same non-termination failure that sank Ornith-3.6 and MiniMax-M2.1 | deleted 2026-08-04 |
 | `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill` (Q4_K_M, 20.22 GiB + mmproj) | `fast` -> `nerkyor-eval` | 2026-08-04, re-verdicted 2026-08-07 | **eval slot, exonerated** | won every standalone eval; lost `fast` twice on 2026-08-04 to two `ErrorDeviceLost` GPU hangs that were **wrongly attributed to it** - the real cause was amdgpu's 2000 ms compute-ring watchdog, which also hit `coder` (no speculation at all) the day before. Weights were deleted 2026-08-05 on that bad diagnosis and redownloaded 2026-08-07; `nerkyor-eval` slot restored. Owes a real-traffic soak with the watchdog fix in place before it can retake `fast`. See "Root cause, corrected" below | on disk (`nerkyor-Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill-Q4_K_M.gguf` + `-mmproj-F16.gguf`) |
 | `nerkyor/Qwen3.6-27B-DSV4Pro-GLM52-SFT-GPT55-RL-Coding-GGUF` (Q4-LynnStyle, dense) | `coder` | 2026-08-04 | **rejected** | confirmed dense (`qwen35`, zero expert tensors) — 4.1 t/s base, 8.5 t/s even with its own MTP draft sidecar; reproduces this repo's established dense-model rejection a third time | deleted 2026-08-04 |
+| `mudler/Qwen3.5-35B-A3B-APEX-GGUF` (I-Quality, 21.25 GiB + mmproj) | `fast` | 2026-08-15 | **rejected** | the base model `fast` is a post-train OF, same recipe/tier/geometry - **2/6 on `code-eval-hard`**, a tier everything else saturates, by quitting after 2 turns with tests still red; also worse perplexity at 61/61 and -27% tg from the dropped MTP head | on disk (`EVAL-apex-q35-IQuality.gguf` + mmproj) |
+| `nerkyor/Qwen3.6-35B-A3B-APEX-MTP-GGUF` ("I-Balanced", 24.27 GiB) - **re-test** | `fast` | 2026-08-15 | **rejected again** | reproduces the 2026-08-04 verdict almost exactly: 5/10 with 5 truncations and 143,308 chars against 6/10, 4 truncations and 143,125 chars then. Fastest model ever measured here (35.14 tg) and the **best perplexity ever measured here** (2.0069, beats `fast` at 61/61) - and it still cannot finish a hard reasoning item | on disk (`EVAL-apexmtp-q36-IBalanced.gguf`) |
+| `zTrojan/Qwen3.5-122B-A10B-REAP30-APEX-GGUF` (Mini, 30.76 GiB) | `balanced` / `deep` | 2026-08-15 | **rejected** | 30% expert-pruned, 180 of 256 left. Loses to `deep` on every axis: 6/10 with 4 truncations against 8/10 with none, 2929 s against 546 s, 13.06 tg against 15.55, and worst perplexity measured here (2.1699, +7.5%). Bottom tier - I-Compact untested by decision | on disk (`EVAL-reap30-mini.gguf`) |
 
 ### Ornith-Agents-A1-3.6-35B-A3B — rejected 2026-08-01, tested for `fast`
 
@@ -3054,3 +3057,198 @@ Two things already established that the re-run does not need to redo: it has no
 MTP head (checked in the tensor scan, and the server refuses `--spec-type
 draft-mtp` outright), so there is no draft length to sweep beyond the n-max 0
 baseline; and the tier question is answered.
+
+---
+
+# Three candidates, 2026-08-15 - the session where perplexity inverted
+
+Two candidates tested against `fast` and one against `balanced`, by request.
+All three rejected. Everything below is same-session through the production
+router, `bench-guard.sh` reporting "no throttling, result is trustworthy" on
+every throughput run, build `05dad3b`, `parallel = 3`.
+
+The models, and what step 0 established before any weights were downloaded:
+
+| | `apexq-eval` | `apexmtp-eval` | `reap30-eval` |
+|---|---|---|---|
+| repo | `mudler/Qwen3.5-35B-A3B-APEX` | `nerkyor/Qwen3.6-35B-A3B-APEX-MTP` | `zTrojan/Qwen3.5-122B-A10B-REAP30-APEX` |
+| tier / size | I-Quality, 21.25 GiB | I-Balanced, 24.27 GiB | Mini, 30.76 GiB |
+| arch | `qwen35moe`, 40 blk, 256 exp top-8 | `qwen35moe`, 40 blk | `qwen35moe`, 48 blk, **180 exp** top-8 |
+| MTP head | **dropped in conversion** | present | **dropped in conversion** |
+| vision | mmproj published | none | none |
+| vocab | 248320 gpt2 | 248320 gpt2 | 248320 gpt2 |
+
+**Step 0 was done by range-fetching 50 MB of each GGUF header**, not by
+downloading the weights. `curl -r 0-52428800` on the resolve URL carries the
+full KV block and tensor table, which answers arch, block count, expert count,
+context length, tokenizer, chat template and MTP presence. That is the cheapest
+step in this playbook and it decided the shape of the whole session; it belongs
+in step 0 permanently.
+
+All three carry the **same 248320-token gpt2 vocab as `fast`**, which is why
+cross-model perplexity below is legitimate rather than merely suggestive. That
+is rare here, and it was verified from each GGUF KV rather than assumed.
+
+## Results
+
+| | **`fast`** | **`apexq-eval`** | **`balanced`** | **`deep`** | **`reap30-eval`** | **`apexmtp-eval`** |
+|---|---|---|---|---|---|---|
+| role | control | candidate | control | control | candidate | candidate |
+| tg 1 stream | 33.46 | 24.56 | 30.57 | 15.55 | 13.06 | **35.14** |
+| pp 1 stream | **320.2** | 247.2 | 286.0 | 138.9 | 129.9 | 251.9 |
+| tg 2 stream, aggregate | **17.49** | 13.79 | 14.40 | 8.23 | 6.86 | 16.22 |
+| draft acceptance | 0.808 | none | 0.861 | none | none | 0.795 |
+| **reason-eval-hard** | 8/10, 1 TRUNC, 880 s, 79.5k | 8/10, **2 TRUNC**, 1119 s, 87.2k | **10/10, 0 TRUNC**, 212 s, 20.7k | 8/10, **0 TRUNC**, 546 s, 26.6k | **6/10, 4 TRUNC**, 2929 s, 111.6k | **5/10, 5 TRUNC**, 1483 s, 143.3k |
+| code-eval-hard | 6/6, 192 s, 29 t | **2/6**, 131 s, 18 t | 6/6, 271 s, 33 t | 5/6, 948 s, 56 t | 6/6, 389 s, 33 t | not run |
+| code-eval-claude | 6/6, 115 s, 39 t | 6/6, 162 s, 31 t, **1 RBE** | 6/6, 114 s, 33 t | 6/6, 215 s, 34 t | 6/6, 306 s, 35 t | not run |
+| vision tier | 3/4 (compare TRUNC) | 3/4 (compare TRUNC) | **4/4** | n/a | n/a | n/a |
+| perplexity | 2.0183 | 2.0405 | 2.0079 | not comparable | 2.1699 | **2.0069** |
+
+Paired per-chunk ordering over chunks 20-80, the reading that decides sign:
+
+| pair | lower at | reading |
+|---|---|---|
+| `apexmtp` vs `fast` | 61/61 | **solid** - apexmtp better |
+| `apexmtp` vs `balanced` | 41/61, 6 flips | wash |
+| `balanced` vs `fast` | 51/61, 1 flip | wash |
+| `fast` vs `apexq` | 61/61 | **solid** - fast better |
+| `balanced` vs `reap30` | 61/61 | **solid** - balanced better |
+| `fast` vs `reap30` | 61/61 | **solid** - fast better |
+
+`deep` is excluded from perplexity deliberately: arch `laguna`, different
+tokenizer, so a number for it would not be comparable rather than merely noisy.
+
+## The result that matters: perplexity inverted
+
+**`apexmtp-eval` has the best perplexity ever measured on this box** - 2.0069,
+lower than `fast` at 61 of 61 paired chunks with no flips, the strongest form
+this repo's own test has - **and it is the worst hard reasoner ever measured
+here**, 5/10 with 5 truncations and 143k chars of reasoning that never reach a
+conclusion. It is also the fastest model ever measured here, 35.14 tg against
+`fast`'s 33.46.
+
+EVAL-PLAYBOOK step 8 already said perplexity gain does not predict capability
+gain. This is stronger than that. Perplexity did not fail to predict capability
+here, it **inverted** it: a solid 61/61 win on the metric alongside the worst
+result on the tier that decides. Any future candidate that arrives with a
+perplexity argument and no `reason-eval-hard` number has said nothing.
+
+## Two validations of the method, both free
+
+**Perplexity is bit-reproducible, confirmed.** `fast` re-measured 2.0183 +/-
+0.02510 and `balanced` 2.0079, matching their recorded figures to four decimals
+across eleven days, a `parallel` change and a rebuilt binary. The `balanced` vs
+`fast` pairing also re-derived independently as 51/61 with one flip, the exact
+historical reading. Incumbent perplexity runs really can be reused across
+sessions; this is the verification the playbook asks for.
+
+**The non-termination reject reproduces to 0.13%.** `apexmtp-eval` was rejected
+on 2026-08-04 at 6/10, 4 truncations, 143,125 chars of reasoning. Re-tested
+today under a different `parallel`, a different binary, and a draft length
+re-derived from scratch: 5/10, 5 truncations, **143,308 chars**. Failure to
+terminate is a stable property of the model, not a bad day, and it survives
+every serving change this box has made. Re-testing a non-termination reject is
+close to worthless, which is the argument for spot-checking one tier rather
+than running nine steps, as was done here.
+
+## `apexq-eval`: the post-train is doing the agentic work
+
+The closest thing to a controlled experiment this box has run. `fast` is
+Ornith-1.0-35B, a post-train **of this exact base model**, quantised with the
+same APEX recipe at the same tier, within 0.64 GiB of the same size, same 40
+blocks, same 256 experts top-8, same GDN interval 4, same vocab. What differs
+is the post-train, plus the MTP head mudler's conversion dropped.
+
+It scored **2/6 on `code-eval-hard`**, a tier that saturates at 6/6 for
+everything else ever run here, including a 30%-pruned model at 13 t/s. The
+failure detail is the finding:
+
+| task | `apexq-eval` | `fast` |
+|---|---|---|
+| dup-block | FAIL, 4 turns, 1374c | PASS, 5 turns, 699c |
+| two-bugs | FAIL, **2 turns**, 474c | PASS, 5 turns, 727c |
+| hidden-call | FAIL, **2 turns**, 489c | PASS, 5 turns, 1833c |
+| shared-state | FAIL, **2 turns**, 577c | PASS, 5 turns, 602c |
+
+Every failure is the same shape: it stops after two turns having left the tests
+red, with a few hundred characters of reasoning. It is not hitting a capability
+ceiling, it never looks. Zero edit misses and zero botched calls, so the tool
+surface works fine. On `code-eval-claude`, whose harness structure pushes more
+turns, the same model scores 6/6 in 31 turns.
+
+So the weights are not the problem: 1.10% of perplexity separates it from
+`fast`, and it passes a client-shaped tier under a harness that makes it
+iterate. **What the post-train supplies is the disposition to keep going until
+the tests pass**, and without it a competent base model is not an agentic
+coder. It also means `code-eval-hard` and `code-eval-claude` disagree by design,
+and that disagreement is informative rather than noise.
+
+Secondary: the dropped MTP head costs 27% of generation against `fast`. Its
+unspeculated 24.64 t/s sits within 2% of `apexmtp-eval`'s unspeculated 24.17,
+so the entire gap to `fast` is the head, not the weights.
+
+## `reap30-eval`: pruning does not buy a `deep` slot
+
+Scored against `deep`, the alias its throughput could plausibly displace, and
+it loses on every axis at once: 6/10 with 4 truncations against 8/10 with none,
+2929 s against 546 s (49 minutes on ten items), 13.06 tg against 15.55, 6.86
+aggregate against 8.23, and the worst perplexity measured on this box, 2.1699,
+worse than `balanced` at 61 of 61 chunks. It is text-only where `balanced`
+carries vision, and it is the slowest thing ever measured here at two streams.
+
+The unpruned Qwen3.5-122B-A10B was already desk-rejected on published scores
+(SWE-bench Verified 72.0-72.4 against Ornith's 75.6). Removing 30% of its
+experts does not raise that ceiling.
+
+**Caveat, recorded honestly: Mini is the bottom of the APEX ladder and the
+I-Compact tier (38.34 GiB) was NOT tested.** Step 8 says a bottom-tier failure
+is a tier result until a higher tier says otherwise, and this failure mode - 4
+truncations - is exactly what one tier up repaired on Thinking-Distill. That
+test was declined by decision, on the grounds that Compact is larger and would
+land near 10 t/s against `deep`'s 15.55, so it can only win on quality while
+losing further on speed. The verdict is therefore **rejected at this tier**,
+and a reader who wants the model question rather than the tier question still
+has that run to do.
+
+## Fallout for the harness
+
+- **`conc-probe` did not exist.** EVAL-PLAYBOOK step 5 has cited
+  `python3 conc-probe <alias> 2` since it was written, and README quotes its
+  output in the `parallel` 2 -> 3 tables, but it lived only as an inline script
+  in a session and was lost. Rewritten as `conc-probe.py`. Every stream gets
+  its own moving window of the source file rather than sharing one prompt,
+  because the shared-prompt shape is what is suspected of the 2026-08-01
+  `coder` stall.
+- **`/slots` answers HTTP 400 in router mode.** `probe-server.sh` pipes that
+  check through `grep -c`, so the 400 becomes a count of 0 and it reports "not
+  busy" unconditionally. **That idle guard has been inoperative for as long as
+  this box has run in router mode**, and every run relying on it was unguarded.
+  `conc-probe.py` reports the failure instead of trusting it. `probe-server.sh`
+  was deliberately left alone rather than changed underneath measurements
+  already taken in the same session.
+- **`bench-guard.sh` exits non-zero on success.** It ran correctly and reported
+  "no throttling, result is trustworthy" every time, but returns 1, so any
+  driver checking its exit status records a false failure.
+- **`pgrep -f` self-matching cost 20 minutes.** A download queue waiting on
+  `pgrep -f EVAL-reap30-mini` matched the `bash -c` wrapper whose own command
+  line contained that string, so it waited on itself. A stale process from an
+  earlier session was found spinning on the identical bug. Wait on a marker
+  file, not on a pattern that can match the waiter.
+
+## Box health
+
+Zero ring timeouts, zero `device wedged`, zero `Fence fallback timer expired`
+on the host across roughly seven hours of continuous GPU load, including one
+49-minute reasoning run. The `amdgpu.lockup_timeout=10000,60000,10000,10000`
+cmdline fix from 2026-08-05 is holding under the heaviest sustained load this
+box has taken since it was applied. Clean throughout: no D-state processes, no
+stray spare-port servers, GTT back to 0.013 GiB on every stop and to the 20.04
+GiB `balanced` baseline at the end.
+
+## Disk
+
+The three candidates remain on disk at 105.5 GiB total
+(`EVAL-apex-q35-IQuality.gguf` + mmproj, `EVAL-apexmtp-q36-IBalanced.gguf`,
+`EVAL-reap30-mini.gguf`), with their stanzas still in `router.ini` as eval
+slots. Nothing here earned a production alias, so all of it is reclaimable;
+that deletion is a user decision and has not been taken.
