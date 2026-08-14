@@ -27,6 +27,11 @@ what has already been tested and rejected. This file is the method.
 Steps 3-8 are cheap and can kill a candidate. Step 9 is expensive and only
 matters for one that survived.
 
+**Step 3 gates step 5.** Do not run an eval tier until the sweep has settled the
+draft length, including on models believed to have no drafter - the sweep at
+n-max 0 is also how you get the 1- and 2-stream throughput baseline, and this
+repo's own capability claims have been wrong.
+
 ---
 
 ## 0. Vet on paper first
@@ -84,6 +89,22 @@ on 2026-08-07.
 ---
 
 ## 3. Tune the drafter, per model, on real prompts
+
+> **This step GATES step 5. Never run the eval tiers before the sweep.** Every
+> tier result is read against throughput - wall time, turns per second, whether
+> a thinking model finishes inside its budget - so a candidate scored at the
+> wrong draft length is being judged on a config it would never ship with. TD's
+> recorded n-max 4 was 19% down on aggregate against no speculation at all; any
+> eval taken at that setting was measuring the mistake, not the model.
+
+> **Run the sweep even when the model "has no drafter", and verify that claim
+> from the GGUF rather than inheriting it.** At worst it costs one pass at
+> n-max 0 and hands you the 1- and 2-stream baseline you need anyway. At best it
+> catches a wrong assumption: `coder` was documented here as text-only for
+> eleven days and its GGUF repo ships an mmproj the whole time, so "no MTP head"
+> from the same source deserves the same scepticism. Check for a block beyond
+> `block_count - 1` in `gguf_dump.py --no-tensors`, and check the repo listing
+> for an mmproj, before believing any capability claim in this repo's own docs.
 
 Vendor defaults and other models' values do not transfer. Three vendors have
 now shipped a wrong `n-max` for this hardware, and the same model at a different
