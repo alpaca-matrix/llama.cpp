@@ -324,70 +324,72 @@ All through the production router, same session. `fast` is the incumbent
 (Ornith-1.0-35B MTP-APEX). TD is nerkyor Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill.
 KAT is Kwaipilot KAT-Coder-V2.5-Dev, text-only.
 
-| | **`fast`** (Ornith) | **`coder`** | **TD-Q6_K** |
-|---|---|---|---|
-| role | production all-rounder | production coding | eval candidate |
-| on disk | 21.9 GiB | **19.06 GiB** | 27.2 GiB |
-| GTT+VRAM resident | 30.7 GiB | **24.0 GiB** | 36.0 GiB |
-| speculation | MTP, n-max 2, p-min 0.3 | **none** | MTP, n-max 2 |
-| tg, 1 stream | **33.96** | 25.71 | 30.66 |
-| pp, 1 stream | **347.8** | 312.3 | 296.4 |
-| perplexity | 2.0183 | 2.0177 | **2.0079** |
-| **reason-eval-hard** | 8/10, **2 trunc**, 987 s, 93.6k | **10/10, 0 trunc**, 254/276 s, 20.3/22.4k | **10/10, 0 trunc**, 207 s, 20.4k |
-| code-eval-hard | 6/6, 255 s, 29 turns, 14.3k | 6/6, 250 s, 31 turns, **9.5k** | 6/6, 228 s, 31 turns, 12.2k |
-| code-eval-claude | 6/6, 128 s, 41 turns | 6/6, 147 s, **31 turns** | 6/6, **115 s**, 33 turns |
-| vision (compare x3) | 3/3 @ 237 tok | **none** | **3/3 @ 188 tok** |
+| | **`fast`** (Ornith) | **`coder` Q4 +mmproj** | **`coder` Q5** | **TD-Q6_K** |
+|---|---|---|---|---|
+| role | production all-rounder | production coding | eval | eval |
+| resident (GTT+VRAM) | 30.7 GiB | **24.8 GiB** | 33.2 GiB | 36.0 GiB |
+| speculation | MTP n-max 2, p-min 0.3 | **none** (verified) | none | MTP n-max 2 |
+| tg, 1 stream | **33.96** | 25.71 | 21.57 | 30.66 |
+| pp, 1 stream | **347.8** | 312.3 | 289.9 | 296.4 |
+| perplexity | 2.0183 | 2.0177 | **2.0024** | 2.0079 |
+| **reason-eval-hard** | 8/10, **2 trunc**, 987 s, 93.6k | **10/10, 0 trunc**, 254/276 s | **10/10, 0 trunc**, 312/319 s | **10/10, 0 trunc**, 207 s |
+| code-eval-hard | 6/6, 255 s, 29 turns | 6/6, 250 s, 31 turns | 6/6, 270 s, 31 turns | 6/6, 228 s, 31 turns |
+| code-eval-claude | 6/6, 128 s, 41 turns | 6/6, 147 s, 31 turns | 6/6, 143 s, **28 turns** | 6/6, **115 s**, 33 turns |
+| vision tier | 3/4 (compare TRUNC) | **4/4** | **4/4** | **4/4** |
+| vision compare x3 | 3/3 @ 237 tok | **3/3 @ 233 tok** | 4/4 single | **3/3 @ 188 tok** |
 
-Perplexity pairs, per-chunk over 20-80. Only the solid ones support a claim:
+Perplexity pairs, per-chunk over 20-80:
 
 | pair | lower at | reading |
 |---|---|---|
-| TD-Q6 vs `coder` | 61/61 | solid |
-| `fast` vs TD-Q4 | 61/61 | solid |
-| `fast` vs KAT-Q4 / KAT-Q6 | 61/61 | solid |
+| coder-Q5 vs coder-Q4 | 61/61 | solid |
+| coder-Q5 vs TD-Q6 | 61/61 | solid |
+| TD-Q6 vs coder-Q4 | 61/61 | solid |
+| coder-Q5 vs `fast` | 57/61, one tiny flip | probable, not solid |
+| coder-Q4 vs `fast` | 10/61, flips | **wash** |
 | TD-Q6 vs `fast` | 51/61, flips | **wash** |
-| `coder` vs `fast` | 10/61, flips | **wash** |
 
-Removed 2026-08-14: TD-Q4_K_M (lost to `fast` at 61/61, unreliable on
-multi-image vision), and both KAT tiers by decision after Q6 was rejected on
-measurement.
+Removed 2026-08-14: TD-Q4_K_M, and both KAT tiers.
 
 Standing conclusions:
 
-- **`fast` keeps its alias** for anything needing vision, and is the fastest
-  thing here. But it is the WEAKEST hard reasoner of the three - 8/10 with two
-  truncations and 93.6k chars, against 10/10 and ~21k for both others.
-- **`coder` is the hard-reasoning alias**, which the README got wrong for eleven
-  days. 10/10 twice, zero truncations, lightest resident footprint on the box,
-  and the best turn count on the Claude Code tier. Route reasoning here.
-- **TD-Q6 is now a narrow case.** Its whole argument was 10/10 against `fast`'s
-  8/10, and `coder` already delivers that at 12 GiB less. It is worth 5.3 GiB
-  over `fast` only if ONE alias must do hard reasoning AND vision AND tools -
-  which is a serving-topology argument (`--models-max 1` makes routing cost a
-  15-30 s swap), not a model-quality one.
-- **Perplexity is not a capability proxy.** `coder` and `fast` are a wash on
-  perplexity and 10/10 against 8/10 on the tier that matters.
+- **`coder` + its published mmproj is the strongest all-rounder here**, and the
+  cheapest change available: 0.8 GiB for vision on the lightest alias. It beats
+  `fast` on hard reasoning (10/10 against 8/10 with two truncations) and on
+  vision (4/4 against 3/4, since `fast` truncates on the two-image item), at
+  6 GiB less. `fast` wins only on speed, +32% tg.
+- **`coder` was documented as text-only for eleven days and as `reasoning: no`
+  for the same period.** Both wrong. Verify capability claims against the GGUF
+  and the repo listing, including this repo's own.
+- **TD-Q6 is retired as a candidate.** Its last argument was being the only
+  model doing reasoning AND vision in one alias; `coder` does both at 11 GiB
+  less.
+- **`coder` Q5 is rejected.** 16% of generation and 8.4 GiB for a real 0.76%
+  perplexity gain and **zero** capability change.
 
-### The quant-tier lesson, in both directions
+### The quant-tier lesson, across four models
 
-Two models, same experiment, opposite outcomes. **Neither could have been
-inferred; both had to be measured.**
+The same experiment - Q4 against one tier up - has now produced four different
+answers. **Two were surprises against the prior. None could have been inferred.**
 
-| | TD | KAT |
-|---|---|---|
-| Q4 -> Q6 perplexity | **0.82%** - Q4 was starving it | **0.20%** - Q4 is already fine |
-| what Q6 fixed | multi-image vision, 0/3 -> 3/3 deterministic | read-before-edit + edit miss, 1+1 -> 0+0 |
-| what Q6 broke | nothing | **reason-eval-hard: 0 -> 3 truncations across two runs** |
-| verdict | Q6 is the tier to ship | Q6 rejected, Q4 retained |
+| model | PPL gain | capability effect | verdict |
+|---|---|---|---|
+| TD | 0.82% | **fixed** multi-image vision, 0/3 -> 3/3 deterministic | ship the higher tier |
+| KAT | 0.20% | **broke** termination, 0 -> 3 truncations over two runs | keep Q4 |
+| `coder` | 0.76% | **nothing** - same score, truncations, turns and vision | keep Q4 |
 
-The shared half: **a higher tier repairs marginal tool-discipline failures.** On
-both models a Q4 task failure that looked like a model limitation was fixed by
-one tier up.
+**Perplexity gain does not predict capability gain.** TD's 0.82% fixed a task
+failure; `coder`'s 0.76% - almost the same magnitude, solid at 61/61 - changed
+nothing at all. And KAT's *smallest* PPL gain came with the *largest* behaviour
+change, in the wrong direction.
 
-The asymmetric half: **a higher tier can also remove a brake.** KAT's celebrated
-reasoning economy at Q4 is substantially a quantization artifact - coarser
-logits terminate the chain early - and at Q6 the model's real behaviour on hard
-reasoning emerges and does not terminate. So do not assume higher is safer, and
-**re-run `reason-eval-hard` after any requant**, even one whose perplexity says
-the model is insensitive. KAT's perplexity moves 0.20% between tiers while its
-termination behaviour changes completely.
+The one effect that has been consistent: **a higher tier repairs marginal
+tool-discipline failures.** It fixed TD's multi-image comparison and KAT's
+read-before-edit violation and edit miss. Where nothing was marginal, as on
+`coder`, it did nothing.
+
+So: measure the tier, do not infer it - not from perplexity, not from another
+model, not from the same model's other tiers. And **re-run `reason-eval-hard`
+after any requant**, because termination behaviour moved on KAT where its
+perplexity barely did.
+

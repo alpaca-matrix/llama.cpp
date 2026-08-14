@@ -2873,3 +2873,124 @@ and it is a serving-topology argument rather than a model-quality one.
 3. Re-run this battery on any alias whose documented capabilities have never
    been measured. `coder` was mischaracterised for eleven days and the error was
    found by accident, while filling a hole in a table.
+
+---
+
+# `coder` Q5, and `coder` has vision - measured 2026-08-14
+
+Two results from one run. The tier question was the one asked; the vision
+result is the one that matters.
+
+**Verdict: keep Q4. Add the mmproj to it.**
+
+## `coder` has vision, and always did
+
+The GGUF repo publishes `mmproj-Qwen3.6-35B-A3B-Q8_0.gguf`, 0.57 GiB. The
+deployed stanza has never loaded it and this alias has been documented as
+text-only since it took the alias on 2026-08-03. Loaded against the **deployed
+Q4 weights, unchanged**:
+
+| item | result |
+|---|---|
+| read (field value off rendered pixels) | PASS |
+| locate (which button is highlighted) | PASS |
+| compare (two screenshots, one changed field) | PASS |
+| act (read a value, call a tool with it) | PASS |
+| compare, 3-trial reliability | **3/3** - 235/233/233 tokens, 678/684/684 chars |
+
+**4/4, and stable.** For context on that `compare` item: `fast` scores 3/4 on
+this tier because compare TRUNCATES at a 4000-token budget, and TD-Q4 scored
+0/3 on the reliability loop. `coder` passes it deterministically in ~233
+tokens, which is better than `fast` manages at all.
+
+Cost: 24.8 GiB resident with the mmproj against 24.0 without. **0.8 GiB for
+vision, on the lightest alias here.**
+
+This retires the last argument for TD-Q6_K. After `coder` measured 10/10 on
+reason-eval-hard, the only thing left for TD was that one alias should do hard
+reasoning AND vision AND tools together. `coder` does all three, at 24.8 GiB
+against TD-Q6's 36.0, already deployed.
+
+## The Q5 tier: real perplexity, zero capability
+
+The ladder is Q3_16G / Q4 / Q5 / Q8_0 - there is no Q6. Q5-imatrix is 27.60 GiB
+against Q4's 19.06.
+
+| | Q4 (+mmproj) | Q5 | delta |
+|---|---|---|---|
+| resident | **24.8 GiB** | 33.2 GiB | +8.4 |
+| tg | **25.71** | 21.57 | **-16.1%** |
+| pp | **312.3** | 289.9 | -7.2% |
+| perplexity | 2.0177 | **2.0024** | **-0.76%, 61/61 solid** |
+| reason-eval-hard | 10/10, 0 trunc, 254/276 s | 10/10, 0 trunc, 312/319 s | **neutral** |
+| code-eval-hard | 6/6, 250 s, 31 turns | 6/6, 270 s, 31 turns | **neutral** |
+| code-eval-claude | 6/6, 147 s, 31 turns | 6/6, 143 s, **28 turns** | slightly better |
+| vision tier | 4/4 | 4/4 | **neutral** |
+
+The reasoning result is the clean one. Q4's mean wall scaled by the throughput
+ratio predicts 316 s for Q5; Q5 measured 312 s and 319 s. **Every second of the
+difference is throughput. The model behaves identically.**
+
+**This is the important finding, and it is a negative one: a real, solid 0.76%
+perplexity gain bought no capability whatsoever.** Same score on every tier,
+same truncation count, same turn count on two of three coding tiers, same
+vision result. Compare TD, where 0.82% - almost the same magnitude - fixed a
+multi-image failure outright. Perplexity gain does not predict capability gain,
+and this is now measured rather than argued.
+
+Q5's one win is 28 turns against 31 on the Claude Code tier, the best turn count
+of any model measured. It finished that tier in 143 s against Q4's 147 s despite
+being 16% slower per token, because three fewer turns more than paid for it.
+That is not worth 8.4 GiB and 16% of generation everywhere else.
+
+## Where this leaves the tier experiment, across four models
+
+The same experiment has now produced four different answers:
+
+| model | Q4 -> higher tier PPL | capability effect |
+|---|---|---|
+| TD | 0.82% | **fixed** multi-image vision, 0/3 -> 3/3 |
+| KAT | 0.20% | **broke** termination, 0 -> 3 truncations |
+| `coder` | 0.76% | **nothing** |
+
+Two of these were surprises against the prior. **Do not infer the tier effect
+from perplexity, from another model, or from the same model's other tiers -
+measure it.** And note the shared thread that does hold: on TD and KAT the
+higher tier repaired marginal tool-discipline failures, which is the one effect
+that has been consistent.
+
+## Perplexity ordering, all pairs
+
+| model | PPL | |
+|---|---|---|
+| **`coder` Q5** | **2.0024** | best measured |
+| TD-Q6_K | 2.0079 | |
+| `coder` Q4 | 2.0177 | |
+| `fast` | 2.0183 | |
+| TD-Q4_K_M | 2.0245 | deleted |
+| KAT-Q6_K | 2.0443 | deleted |
+| KAT-Q4_K_XL | 2.0484 | deleted |
+
+| pair | lower at | verdict |
+|---|---|---|
+| coder-Q5 vs coder-Q4 | 61/61 | solid |
+| coder-Q5 vs TD-Q6 | 61/61 | solid |
+| TD-Q6 vs `coder` Q4 | 61/61 | solid |
+| coder-Q5 vs `fast` | 57/61, one -0.0014 flip | probable, short of solid |
+| `coder` Q4 vs `fast` | 10/61, flips | wash |
+| TD-Q6 vs `fast` | 51/61, flips | wash |
+
+## Also confirmed: `coder` really has no MTP head
+
+Checked rather than inherited, because the same docs got vision wrong. The
+tensor scan tops out at `blk.39` against `block_count = 40` - no head - and the
+server refuses to start with `--spec-type draft-mtp`:
+
+    llama_init_from_model: context type MTP requested but model doesn't contain MTP layers
+    common_speculative_init_result: failed to create MTP context
+    llama_server: exiting due to model loading error
+
+So one claim was wrong and the other right, which is the point of checking. The
+failure mode is safe - llama.cpp exits rather than silently serving
+unspeculated - and `coder`'s ~25 t/s ceiling against `fast`'s ~34 is structural,
+not a tuning miss.
