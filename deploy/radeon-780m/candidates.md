@@ -2661,3 +2661,123 @@ It answers whether TD is stable enough for `fast` under real traffic, which was
 moot while the vision result stood against it. If either option above is taken
 up, the soak becomes load-bearing again and should be run against the tier that
 is actually being deployed - a Q4 soak says nothing about Q6.
+
+---
+
+# KAT-Coder Q4_K_XL vs Q6_K - measured 2026-08-14
+
+Repeating on KAT the tier comparison that overturned the Thinking-Distill
+verdict the same day. **The result is the opposite, and that is the finding.**
+
+**Verdict: keep Q4_K_XL, reject Q6_K.** It costs 9.3% of generation and 6.6 GiB,
+buys 0.20% of perplexity, and introduces the non-termination failure mode this
+repo treats as disqualifying.
+
+Both tiers measured through the production router in one session. The
+2026-08-07 kat-eval numbers were NOT cited - they predate `parallel` 2 -> 3 and
+used the retired opencode tier - so Q4 was re-taken here.
+
+## Throughput
+
+| | Q4_K_XL | Q6_K |
+|---|---|---|
+| on disk | 21.29 GiB | 27.95 GiB |
+| GTT + VRAM | 28.9 GiB | 35.5 GiB |
+| tg, 1 stream | **29.01** | 26.32 (-9.3%) |
+| pp, 1 stream | 292.0 | 289.6 (-0.8%) |
+
+Prefill barely moves, where TD's Q6 cost 14.8%. That is the byte budget showing
+through: KAT's UD mix already spends 68% of per-token bytes on Q8_0 non-expert
+tensors, so Q4 -> Q6 mostly touches the 22.3% that is routed experts, and
+experts dominate generation far more than prefill.
+
+## The higher tier is WORSE, reproducibly
+
+`reason-eval-hard`, two runs each:
+
+| | run 1 | run 2 |
+|---|---|---|
+| **Q4_K_XL** | 8/10, **0 trunc**, 103 s, 7,354c | 8/10, **0 trunc**, 129 s, 8,805c |
+| **Q6_K** | 8/10, **1 trunc**, 394 s, 46,360c | 7/10, **2 trunc**, 689 s, 77,851c |
+
+Three truncations across two Q6 runs against zero across two Q4 runs, reasoning
+volume 6-9x higher, and the score dropping to 7/10. Q4's spread (103-129 s,
+7.4-8.8k chars) is nowhere near large enough to explain it. At Q6 this model is
+about as bad on this tier as `fast` is (7/10, 2 trunc, 689 s against `fast`'s
+8/10, 2 trunc, 987 s).
+
+**The most defensible reading: KAT's celebrated reasoning economy at Q4 is
+substantially a quantization artifact, and the artifact was helping.** Coarser
+logits terminate the chain early; at Q6 the model's actual behaviour on hard
+reasoning emerges and it does not know when to stop.
+
+The other two tiers do not show the same direction, which is why this needed
+repeating rather than asserting:
+
+| tier | Q4 -> Q6 |
+|---|---|
+| reason-eval-hard | much worse (7.4k -> 46-78k chars, 0 -> 3 truncations) |
+| code-eval-hard | worse (5,915c -> 8,948c, same 20 turns, 175 s -> 250 s) |
+| code-eval-claude | **better** (45 -> 39 turns, and it fixes 1 rbe + 1 edit miss) |
+
+That last row matters and matches TD: **the higher tier repairs marginal
+tool-discipline failures.** Q4 is the only model measured today to violate
+read-before-edit or miss an edit on the Claude Code surface; Q6 does neither.
+So the tier helps where the task is marginal and hurts where the task invites
+unbounded reasoning.
+
+## Perplexity - and the answer to the open byte-budget question
+
+`llama-perplexity`, 80 chunks, `-c 512`, same corpus, paired per-chunk ordering
+over chunks 20-80:
+
+| model | PPL | vs |
+|---|---|---|
+| TD-Q6_K | 2.0079 | - |
+| **`fast`** | **2.0183** | - |
+| TD-Q4_K_M | 2.0245 | - |
+| KAT-Q6_K | 2.0443 | - |
+| KAT-Q4_K_XL | 2.0484 | - |
+
+| pair | lower at | mean gap | verdict |
+|---|---|---|---|
+| KAT-Q6 vs KAT-Q4 | 61/61 | +0.0060 | solid, and small |
+| `fast` vs KAT-Q4 | 61/61 | +0.0278 | solid |
+| `fast` vs KAT-Q6 | 61/61 | +0.0217 | solid |
+| TD-Q6 vs KAT-Q6 | 61/61 | +0.0259 | solid |
+
+**This answers the question the 2026-08-07 section asked and never got.** That
+section recorded that KAT's UD mix spends 68% of per-token bytes on Q8_0
+non-expert tensors and only 22.3% on all 256 routed experts, called the budget
+badly allocated, and asked for a held-out perplexity run before retargeting the
+experts to IQ4_XS. The run says the mix is **not** starving the experts:
+doubling their precision buys 0.20%, comparable to Ornith's entire 0.26%
+distance from its own BF16. This model is quantization-insensitive in this band.
+
+Which makes the IQ4_XS retarget the lever worth pulling, exactly as that section
+guessed - if the experts are insensitive going up, the 68% spent on Q8_0
+non-expert tensors is where the bytes are wasted, and the predicted ~32 t/s
+unspeculated is worth measuring. **Do not simply requantize the experts
+downward without re-running reason-eval-hard**: this section has just
+established that this model's termination behaviour is quantization-sensitive
+even where its perplexity is not.
+
+## Also worth recording: perplexity is not a capability proxy
+
+KAT is the **best** model measured today on `code-eval-hard` turn economy (20
+turns at both tiers, against 29-32 for everything else) and the **worst** on
+perplexity, on a code corpus, as a model post-trained for coding. Post-training
+for agentic behaviour evidently trades against next-token fit. Rank on the tier
+that matches the job, not on PPL.
+
+## Where this leaves KAT
+
+`kat-eval` stays at Q4_K_XL. Q6_K is rejected on the numbers above.
+
+What has still never been measured is KAT against **`coder`**, the alias it
+would actually take - it is text-only and `coder` is the text-only coding slot.
+Every comparison so far has been against `fast`. The 2026-08-07 record has KAT
+ahead of `coder` (332.9/29.24 against 326/26.14, and `coder` carries no
+speculation at all), but that record predates `parallel` 2 -> 3 and cannot be
+cited under the determinism rule. That head-to-head needs no download and is
+the next thing worth running.

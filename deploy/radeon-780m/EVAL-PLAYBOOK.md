@@ -305,15 +305,26 @@ KAT is Kwaipilot KAT-Coder-V2.5-Dev, text-only.
 
 | | `fast` | TD-Q6_K | KAT-Q4_K_XL | KAT-Q6_K |
 |---|---|---|---|---|
-| size on disk | 21.9 GiB | 27.2 | 21.29 | 27.95 |
-| GTT+VRAM resident | 30.7 GiB | 36.0 | 28.9 | 35.5 |
+| size on disk | 21.9 GiB | 27.2 | **21.29** | 27.95 |
+| GTT+VRAM resident | 30.7 GiB | 36.0 | **28.9** | 35.5 |
 | tg, 1 stream | **33.96** | 30.66 | 29.01 | 26.32 |
 | pp, 1 stream | **347.8** | 296.4 | 292.0 | 289.6 |
-| perplexity | 2.0183 | 2.0079 | pending | pending |
-| reason-eval-hard | 8/10, 987 s, **2 trunc**, 93.6k | **10/10**, 207 s, 0, 20.4k | 8/10, **103 s**, 0, **7.4k** | pending |
-| code-eval-hard | 6/6, 255 s, 29 turns | pending | 6/6, 175 s, **20 turns** | pending |
-| code-eval-claude | 6/6, 128 s, 41 turns | 6/6, 115 s, **33 turns** | 6/6, 218 s, **45 turns, 1 rbe, 1 edmiss** | pending |
+| perplexity | 2.0183 | **2.0079** | 2.0484 | 2.0443 |
+| reason-eval-hard | 8/10, 987 s, **2 trunc**, 93.6k | **10/10**, 207 s, 0, 20.4k | 8/10, **103/129 s**, 0, **7.4/8.8k** | 8/10 then 7/10, **1 then 2 trunc**, 394/689 s, 46/78k |
+| code-eval-hard | 6/6, 255 s, 29 turns, 14.3k | 6/6, 228 s, 31 turns, 12.2k | 6/6, **175 s**, **20 turns**, **5.9k** | 6/6, 250 s, **20 turns**, 8.9k |
+| code-eval-claude | 6/6, 128 s, 41 turns | 6/6, 115 s, **33 turns** | 6/6, 218 s, 45 turns, **1 rbe, 1 edmiss** | 6/6, 205 s, 39 turns, 0, 0 |
 | vision, compare x3 | 3/3 @ 237 tok | **3/3 @ 188 tok** | n/a, text-only | n/a |
+
+Perplexity pairs, per-chunk over 20-80. Only one is a wash; the rest are solid:
+
+| pair | lower at | reading |
+|---|---|---|
+| TD-Q6 vs `fast` | 51/61, flips | **a wash** |
+| `fast` vs TD-Q4 | 61/61 | solid |
+| `fast` vs KAT-Q4 | 61/61 | solid |
+| `fast` vs KAT-Q6 | 61/61 | solid |
+| TD-Q6 vs KAT-Q6 | 61/61 | solid |
+| KAT-Q6 vs KAT-Q4 | 61/61, mean +0.0060 | solid but only 0.20% |
 
 Removed 2026-08-14: TD-Q4_K_M. It lost to `fast` on perplexity at 61 of 61
 paired chunks and was unreliable on multi-image vision (0/3). Weights deleted,
@@ -321,14 +332,39 @@ alias removed.
 
 Standing conclusions:
 
-- **`fast` keeps its alias.** Fastest on both axes, lightest of the viable
-  options, and nothing has beaten it on a quality axis by enough to pay ~10% of
-  generation.
+- **`fast` keeps its alias.** Fastest on both axes and beaten on quality by only
+  one candidate, by not enough to pay ~10% of generation.
 - **TD-Q6 is the strongest challenger** and the only model to solve the two
   hard-reasoning items `fast` cannot finish. Costs ~10% tg and 5.3 GiB.
   Perplexity does **not** support it - that pair is a wash.
-- **KAT's reasoning economy is its real property**: same 8/10 as `fast` in a
-  tenth of the wall clock and a thirteenth of the reasoning, zero truncations.
-- **KAT is the weakest on the Claude Code tool surface** despite being the
-  strongest on `code-eval-hard`. The tiers disagree, and the one matching your
+- **KAT stays at Q4_K_XL.** Q6 costs 9.3% tg and 6.6 GiB, buys 0.20% perplexity,
+  and introduces non-termination.
+- **KAT is the weakest on the Claude Code tool surface** despite the best turn
+  economy on `code-eval-hard`. The tiers disagree, and the one matching your
   client is the one to weight.
+- **Perplexity is not a capability proxy.** KAT has the best `code-eval-hard`
+  turn economy and the worst perplexity, on a code corpus, as a coding model.
+
+### The quant-tier lesson, in both directions
+
+Two models, same experiment, opposite outcomes. **Neither could have been
+inferred; both had to be measured.**
+
+| | TD | KAT |
+|---|---|---|
+| Q4 -> Q6 perplexity | **0.82%** - Q4 was starving it | **0.20%** - Q4 is already fine |
+| what Q6 fixed | multi-image vision, 0/3 -> 3/3 deterministic | read-before-edit + edit miss, 1+1 -> 0+0 |
+| what Q6 broke | nothing | **reason-eval-hard: 0 -> 3 truncations across two runs** |
+| verdict | Q6 is the tier to ship | Q6 rejected, Q4 retained |
+
+The shared half: **a higher tier repairs marginal tool-discipline failures.** On
+both models a Q4 task failure that looked like a model limitation was fixed by
+one tier up.
+
+The asymmetric half: **a higher tier can also remove a brake.** KAT's celebrated
+reasoning economy at Q4 is substantially a quantization artifact - coarser
+logits terminate the chain early - and at Q6 the model's real behaviour on hard
+reasoning emerges and does not terminate. So do not assume higher is safer, and
+**re-run `reason-eval-hard` after any requant**, even one whose perplexity says
+the model is insensitive. KAT's perplexity moves 0.20% between tiers while its
+termination behaviour changes completely.
