@@ -1,8 +1,10 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "llama-local/fast",
-  "small_model": "llama-local/fast",
-  "plugin": ["superpowers@git+https://github.com/obra/superpowers.git"],
+  "model": "llama-local/balanced",
+  "small_model": "llama-local/balanced",
+  "plugin": [
+    "superpowers@git+https://github.com/obra/superpowers.git"
+  ],
   "instructions": [
     "~/.config/opencode/prompt/core.txt",
     ".opencode/memory/MEMORY.md"
@@ -11,14 +13,25 @@
     "claude-style": {
       "description": "General-purpose, asks before edit/bash",
       "prompt": "{file:~/.config/opencode/prompt/claude-style.txt}",
-      "permission": { "edit": "ask", "bash": "ask" }
+      "permission": {
+        "edit": "ask",
+        "bash": "ask"
+      }
     },
     "claude-style-plan": {
       "description": "Read-only investigation and planning, no execution",
       "prompt": "{file:~/.config/opencode/prompt/claude-style-plan.txt}",
       "permission": {
         "edit": "deny",
-        "bash": { "*": "deny", "git status": "allow", "git diff": "allow", "git log*": "allow", "ls*": "allow", "cat*": "allow", "grep*": "allow" }
+        "bash": {
+          "*": "deny",
+          "git status": "allow",
+          "git diff": "allow",
+          "git log*": "allow",
+          "ls*": "allow",
+          "cat*": "allow",
+          "grep*": "allow"
+        }
       }
     },
     "claude-style-auto": {
@@ -26,7 +39,12 @@
       "prompt": "{file:~/.config/opencode/prompt/claude-style-auto.txt}",
       "permission": {
         "edit": "allow",
-        "bash": { "*": "allow", "rm -rf*": "deny", "git push --force*": "deny", "git reset --hard*": "deny" }
+        "bash": {
+          "*": "allow",
+          "rm -rf*": "deny",
+          "git push --force*": "deny",
+          "git reset --hard*": "deny"
+        }
       }
     }
   },
@@ -39,29 +57,26 @@
         "apiKey": "local"
       },
       "models": {
+        "balanced": {
+          "name": "balanced - nerkyor Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill Q6_K (35B-A3B, MTP, vision) - DEFAULT",
+          "limit": {
+            "context": 262144,
+            "output": 32768
+          }
+        },
         "fast": {
-          "name": "fast - SC117/Ornith-1.0-35B-MTP-APEX (35B-A3B, MTP)",
-          "limit": { "context": 262144, "output": 32768 }
-        },
-        "coder": {
-          "name": "coder - nerkyor/Qwen3.6-35B-A3B-DSV4Pro-RL-Agent (35B-A3B)",
-          "limit": { "context": 262144, "output": 32768 }
-        },
-        "assist": {
-          "name": "assist - unsloth/Qwen3-VL-30B-A3B-Instruct (vision)",
-          "limit": { "context": 262144, "output": 32768 }
+          "name": "fast - SC117/Ornith-1.0-35B-MTP-APEX (35B-A3B, MTP, vision)",
+          "limit": {
+            "context": 262144,
+            "output": 32768
+          }
         },
         "deep": {
-          "name": "deep - openai/gpt-oss-120b MXFP4 (117B-A5.1B)",
-          "limit": { "context": 131072, "output": 32768 }
-        },
-        "td-q6-eval": {
-          "name": "td-q6-eval - nerkyor/Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill Q6_K (35B-A3B, MTP)",
-          "limit": { "context": 262144, "output": 32768 }
-        },
-        "laguna-eval": {
-          "name": "laguna-eval - poolside/Laguna-S-2.1 UD-IQ3_S (118B-A8B, DFlash)",
-          "limit": { "context": 262144, "output": 32768 }
+          "name": "deep - poolside/Laguna-S-2.1 attn-IQ4_XS v3 (118B-A8B, text-only)",
+          "limit": {
+            "context": 262144,
+            "output": 32768
+          }
         }
       }
     }
