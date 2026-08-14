@@ -357,6 +357,12 @@ against, and two of those models are the strongest results on it - `coder`
 matched `balanced` on reasoning at 24.8 GiB and beat `fast` on vision, and
 gpt-oss held `deep` at 10/10. Both are re-downloadable.
 
+**`coder` Q4 +mmproj was re-downloaded the same day as `coder-eval`**, an eval
+slot rather than an alias. Its column above is what it measured then, under a
+lineup that no longer exists - promoting it means running this playbook against
+today's `balanced` in one session, not citing that column. Its Q5 tier stays
+deleted; that experiment has an answer.
+
 Standing conclusions:
 
 - **`balanced` is the default** on the tier this repo built to discriminate:

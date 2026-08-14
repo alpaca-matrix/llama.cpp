@@ -1027,6 +1027,17 @@ axes while 6 GiB lighter. **gpt-oss-120b** held `deep` at 10/10 on the hard
 tier. Both are recoverable by re-download; the measurements are in
 `candidates.md`.
 
+**`coder-eval` restored 2026-08-14, same day, by request.** The Q4-imatrix
+weights plus the repo's own `mmproj-Qwen3.6-35B-A3B-Q8_0.gguf` - that is, the
+config `coder-vision-eval` measured, not the text-only one production `coder`
+actually shipped. It is an eval slot, never `load-on-startup`, and not wired
+into `opencode.json`; select it explicitly. Q5 is not restored, having bought
+0.76% perplexity and no measurable capability. What it costs against the
+survivors is throughput: 25.71 tg unspeculated, ~24% under `fast` and ~16%
+under `balanced`, which is why it lost the cut. Promoting it to a production
+alias needs the full playbook against today's `balanced` in the same session,
+plus the soak it has never had.
+
 
 Measured on `coder` (80B-A3B, 46 GiB): pp ~210 t/s, tg 18 t/s base, 25 t/s with
 the DFlash drafter (`spec-type = draft-dflash`, 88% acceptance at n-max 3-4).
@@ -1092,6 +1103,7 @@ Measured on this hardware, generation with a 2.4k-token prompt:
 | `balanced` | 296 t/s | 30.66 t/s | yes | yes | **yes - 10/10, 0 truncations, 207 s, 20.4k chars** |
 | `fast` | 348 t/s | 33.96 t/s | yes | yes | yes, but **8/10 with 2 truncations**, 987 s, 93.6k chars |
 | `deep` | see candidates.md | 13.38 t/s | no | yes | not measured on the hard tier at this tier |
+| `coder-eval` | 312 t/s | 25.71 t/s | yes (mmproj) | yes | **yes - 10/10, 0 truncations, 254/276 s** |
 
 **A note kept because the lesson outlives the alias: `coder` was listed here as
 `reasoning: no` and as text-only, and both were wrong.** It carries `reasoning-format = deepseek`, emits ~20k chars of reasoning

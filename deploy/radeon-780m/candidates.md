@@ -418,7 +418,7 @@ row is linked in the "Detail" column.
 | `gpt-oss-120b` MXFP4 (publisher unverified) | `deep` | 2026-07-31 | **deployed** | 10/10 on `reason-eval-hard.sh` in 208s vs `fast`'s 8/10 in 999s; native `reasoning_effort` | on disk |
 | `unsloth/Qwen3-Coder-Next-GGUF` (UD-Q4_K_XL) + DFlash drafter | `coder` | 2026-07-31 | **retired 2026-08-03** | beaten on every axis by nerkyor DSV4Pro (pp 229 vs 326, tg 18.6 vs 26.4 base); also started repeatably hitting DeviceLost on load | deleted 2026-08-03 |
 | Qwen3.6-35B-A3B vanilla (official quant) | `fast`/`deep` | downloaded 2026-07-31, desk-rejected | **rejected** | same hybrid-GDN shape as `coder` (10/40 full-attention) — no reason to expect better prefill than the fine-tunes already covering this base | deleted 2026-08-03 |
-| `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-SFT-GPT56Sol-RL-Agent-GGUF` (Q4, 19.06 GiB) | `coder` | 2026-08-03 | **deployed** | beats Coder-Next on every axis, ties `fast` on saturating evals; see "Hard-tier results" below | on disk (`nerkyor-dsv4pro-q4.gguf`) |
+| `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-SFT-GPT56Sol-RL-Agent-GGUF` (Q4, 19.06 GiB) | `coder` -> `coder-eval` | 2026-08-03 | **held `coder` until 2026-08-14, now an eval slot** | beats Coder-Next on every axis, ties `fast` on saturating evals, and once its mmproj was loaded it was the best model measured here that day; lost the alias to the three-alias cut on throughput, not merit | deleted 2026-08-14, re-downloaded the same day as `EVAL-coder-Q4.gguf` + `EVAL-coder-mmproj-Q8_0.gguf` |
 | `nerkyor/Qwen3.6-35B-A3B-APEX-MTP-GGUF` ("I-Balanced", 24.27 GiB) | `fast` (MTP comparison) | 2026-08-04 | **rejected** | class-leading throughput once retuned to n-max=3 (35.6 t/s served, beats `fast`) but hard-reasoning 6/10 with 4 truncations — same non-termination failure that sank Ornith-3.6 and MiniMax-M2.1 | deleted 2026-08-04 |
 | `nerkyor/Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill` (Q4_K_M, 20.22 GiB + mmproj) | `fast` -> `nerkyor-eval` | 2026-08-04, re-verdicted 2026-08-07 | **eval slot, exonerated** | won every standalone eval; lost `fast` twice on 2026-08-04 to two `ErrorDeviceLost` GPU hangs that were **wrongly attributed to it** - the real cause was amdgpu's 2000 ms compute-ring watchdog, which also hit `coder` (no speculation at all) the day before. Weights were deleted 2026-08-05 on that bad diagnosis and redownloaded 2026-08-07; `nerkyor-eval` slot restored. Owes a real-traffic soak with the watchdog fix in place before it can retake `fast`. See "Root cause, corrected" below | on disk (`nerkyor-Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill-Q4_K_M.gguf` + `-mmproj-F16.gguf`) |
 | `nerkyor/Qwen3.6-27B-DSV4Pro-GLM52-SFT-GPT55-RL-Coding-GGUF` (Q4-LynnStyle, dense) | `coder` | 2026-08-04 | **rejected** | confirmed dense (`qwen35`, zero expert tensors) — 4.1 t/s base, 8.5 t/s even with its own MTP draft sidecar; reproduces this repo's established dense-model rejection a third time | deleted 2026-08-04 |
@@ -2994,3 +2994,63 @@ So one claim was wrong and the other right, which is the point of checking. The
 failure mode is safe - llama.cpp exits rather than silently serving
 unspeculated - and `coder`'s ~25 t/s ceiling against `fast`'s ~34 is structural,
 not a tuning miss.
+
+---
+
+# `coder` restored as `coder-eval` - 2026-08-14, hours after it was deleted
+
+Restored by request, at Q4-imatrix plus the mmproj. Recorded here because a
+delete-and-redownload inside one day looks like indecision unless the reason is
+written down: it was never rejected on measurement. The three-alias cut was a
+lineup-size decision, and this model's own section above ("`coder` has vision,
+and always did") is the strongest result in this file.
+
+## What was restored, exactly
+
+| | file | size |
+|---|---|---|
+| weights | `Qwen3.6-35B-A3B-DSV4Pro-SFT-GPT56Sol-RL-Agent-LynnStyle-Q4-imatrix.gguf` -> `EVAL-coder-Q4.gguf` | 19.06 GiB |
+| mmproj | `mmproj-Qwen3.6-35B-A3B-Q8_0.gguf` -> `EVAL-coder-mmproj-Q8_0.gguf` | 0.57 GiB |
+
+Both SHA256-verified by `fetch-model.sh` against the HF API.
+
+**This is `coder-vision-eval`'s config, not `coder`'s.** Production `coder`
+never loaded an mmproj - the stanza had none for the eleven days it held the
+alias, on the assumption that the repo published none. It does, and the
+capability was only measured on the day the alias was cut. The Q4 weights are
+byte-identical to what shipped; the mmproj is the whole difference.
+
+**Q5 is deliberately not restored.** It is settled: 0.76% perplexity, solid at
+61 of 61 paired chunks, and zero capability change - same 10/10, same zero
+truncations, same turn counts, same vision result - for +8.5 GiB. Restoring it
+would be re-running an experiment that already has an answer.
+
+## What it is worth, and what it costs
+
+Carried forward from the same-session measurements above, and **not to be cited
+as a live comparison** - nothing on this box compares across sessions:
+
+| | `coder` Q4 +mmproj | `balanced` | `fast` |
+|---|---|---|---|
+| resident | **24.8 GiB** | 36.0 | 30.7 |
+| reason-eval-hard | 10/10, 0 trunc, 254/276 s | 10/10, 0 trunc, 207 s | 8/10, 2 trunc, 987 s |
+| vision compare | 3/3 @ 233 tok | 3/3 @ 188 tok | TRUNC |
+| tg / pp, 1 stream | 25.71 / 312.3 | 30.66 / 296.4 | **33.96 / 347.8** |
+| speculation | none (verified: no MTP head) | MTP n-max 2 | MTP n-max 2, p-min 0.3 |
+
+So it ties the default on the tier built to discriminate, at 11.2 GiB less
+pool, and pays ~16% of generation for it. That trade is the open question the
+slot exists to settle; it is not settled by the table above.
+
+## What it would take to promote it
+
+It is an eval slot. `load-on-startup = false`, not in `opencode.json`, selected
+by name only. Giving it a production alias means EVAL-PLAYBOOK.md end to end
+against **today's** `balanced` in one session - steps 3 through 5 at minimum,
+since the numbers above were taken under a lineup that no longer exists - plus
+step 9, the soak, which this model has never had at any tier.
+
+Two things already established that the re-run does not need to redo: it has no
+MTP head (checked in the tensor scan, and the server refuses `--spec-type
+draft-mtp` outright), so there is no draft length to sweep beyond the n-max 0
+baseline; and the tier question is answered.
