@@ -2520,14 +2520,44 @@ this file established that Ornith's entire distance from its own BF16 weights is
 headroom**. Q4_K_M is doing real damage to this model where APEX's adaptive mix
 costs Ornith almost nothing.
 
-Two consequences the record had backwards:
+Two consequences, one solid and one that did NOT survive checking:
 
 - **TD as deployed is worse than `fast` on perplexity** (2.0245 against 2.0183).
   Nobody had measured this; the record had TD winning on quality throughout.
-- **TD at Q6_K is better than Ornith at any tier**, including its unquantized
-  weights. "Requantizing Ornith" concluded that quantization is not a quality
-  lever on `fast` and a real upgrade has to be different weights. These are
-  those weights.
+  Solid - see the paired analysis below.
+- **TD at Q6_K is NOT established as better than Ornith.** An earlier version of
+  this section claimed it was better "at any tier, including its unquantized
+  weights", on the strength of 2.0079 against Ornith's BF16 2.0131. The paired
+  per-chunk analysis does not support that, and the claim is withdrawn.
+
+### Paired per-chunk analysis - the step that settles the sign
+
+All three runs re-taken 2026-08-14 with per-chunk output retained, because the
+final estimates sit inside the individual error bars and only the paired
+ordering can establish a sign. All three reproduced their earlier final
+estimates EXACTLY, to four decimals and the same error bar - perplexity is
+bit-reproducible here, unlike generation, which makes the pairing trustworthy.
+
+Counting cumulative chunks 20-80, the way the Ornith requant work did it:
+
+| pair | lower at | mean gap | flips? |
+|---|---|---|---|
+| TD-Q6 vs TD-Q4 | **61 of 61** | +0.0166 | no, min +0.0132 |
+| Ornith vs TD-Q4 | **61 of 61** | +0.0124 | no, min +0.0057 |
+| TD-Q6 vs Ornith | 51 of 61 | +0.0042 | **yes, min -0.0101** |
+
+The first two are solid by this file's own standard: the ordering never flips
+once converged. **The third is not.** TD-Q6 reads lower on average but the sign
+reverses on 10 of 61 chunks and the mean gap is a third of the other two. On
+this corpus **TD-Q6 and Ornith are a wash**, and any claim that one is the
+better model needs a different instrument than perplexity.
+
+What survives is the within-model result (Q4 -> Q6 is real and large) and the
+deployed-tier result (TD-Q4 is genuinely worse than `fast`). What does not
+survive is the cross-model ordering at Q6, which was the more exciting claim and
+the wrong one. The lesson is the same one this file keeps paying for: a
+difference inside the error bars is not a finding until the paired ordering is
+checked, and checking it here took one re-run.
 
 It also explains the vision result mechanically. Two-image comparison is a
 marginal task for this model, and Q4 spends the margin on quantization damage:
