@@ -1081,28 +1081,30 @@ Measured on this hardware, generation with a 2.4k-token prompt:
 | `coder` | 235 t/s | 25 t/s | no | yes | no |
 | `deep` | 242 t/s | 19.6 t/s | no | yes | yes, 8/8 in 279 s |
 
-A temporary `nerkyor-eval` slot (nerkyor Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill)
-holds a `fast` candidate. **Adjudicated 2026-08-14: `fast` keeps the alias.**
-Re-measured through the production router at a corrected draft length (n-max 4
--> 2; 4 was worse than not speculating at all at two streams), its recorded
-throughput lead of 13-18% is really 1.7%, and the two margins the old writeup
-kept for `fast` - code-eval-hard wall time and depth decay - both reverse or
-level out. Its hard-reasoning win is real and reproduced: 10/10 in 150 s
-against `fast`'s 8/10 in 987 s.
+A temporary `td-q6-eval` slot holds nerkyor
+Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill at **Q6_K**. **Adjudicated 2026-08-14:
+`fast` keeps the alias, and the Q4_K_M tier was removed.**
 
-It loses the slot on vision. On a two-image "which field changed" comparison it
-scores 0/3 where `fast` scores 3/3 in 237 deterministic tokens, twice
-non-terminating at 28-32k chars of reasoning and twice reporting that only one
-screenshot was provided. `fast` holds this alias precisely because Hermes sends
-screenshots, so that is disqualifying for this slot and only this slot. The
-obvious redirect is `coder`, which is text-only, where TD's 34.55 t/s against
-`coder`'s unspeculated 26.14 and its reasoning result would both count - not yet
-measured.
+The Q4 tier served here as `nerkyor-eval` and lost outright. Re-measured through
+the production router at a corrected draft length (n-max 4 -> 2; 4 was worse than
+not speculating at all at two streams), its recorded throughput lead of 13-18%
+was really 1.7%, it was **worse than `fast` on perplexity** at 61 of 61 paired
+chunks, and it was unreliable on multi-image vision - 0/3 where `fast` scores
+3/3, twice non-terminating at 28-32k chars. Weights deleted; alias removed.
 
-Not load-on-startup, not wired to any client; select it with
-`"model": "nerkyor-eval"`. Full writeup, including the determinism caveat that
-governs how any of these numbers may be compared, is in `candidates.md` under
-"Re-adjudicating Thinking-Distill for `fast`".
+Q6_K fixes the vision problem (3/3, 188 byte-identical tokens, better than
+`fast`'s 237) and keeps the hard-reasoning win (10/10 in 207 s against `fast`'s
+8/10 in 987 s with two truncations). It costs ~10% of served generation
+(30.66 vs 33.96 t/s), ~15% of prefill, and 5.3 GiB of pool. On perplexity it and
+`fast` are **indistinguishable** - 51 of 61 paired chunks with the ordering
+reversing, which is a wash by this repo's own standard - so the case for it rests
+entirely on task results, not on underlying model quality.
+
+That trade is not taken. Not load-on-startup, not wired to any client; select it
+with `"model": "td-q6-eval"`. It still owes a soak on this tier. Full writeup,
+including the determinism caveat that governs how any of these numbers may be
+compared, is in `candidates.md` under "Re-adjudicating Thinking-Distill for
+`fast`".
 
 A second temporary slot, `kat-eval` (Kwaipilot/KAT-Coder-V2.5-Dev, MTP-grafted
 UD-Q4_K_XL), holds a `coder` candidate: 332.9 t/s / 29.24 t/s served, 4/4, 6/6

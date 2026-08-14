@@ -2584,6 +2584,52 @@ against Q6_K rather than Q4 - a soak of the tier that is not being deployed
 proves nothing - plus a `check-vision-agentic` and `reason-eval-hard` pass on
 Q6 through the router rather than standalone.
 
+## Final tally, Q6_K through the router - and the Q4 tier removed
+
+Everything below was taken through the production router on 2026-08-14, because
+`fast`'s numbers were, and the determinism finding above forbids mixing
+harnesses. Q6_K carried the same spec config the Q4 tier did, so the tier was
+the only variable.
+
+| axis | `fast` (Ornith) | TD-Q4_K_M | TD-Q6_K |
+|---|---|---|---|
+| tg, 1 stream | **33.96** | 34.55 | 30.66 |
+| pp, 1 stream | **347.8** | 337.9 | 296.4 |
+| GTT + VRAM | **30.7 GiB** | 29.1 GiB | 36.0 GiB |
+| perplexity | 2.0183 | 2.0245 | 2.0079 |
+| reason-eval-hard | 8/10, 987 s, **2 trunc**, 93.6k chars | 10/10, 150 s, 16.6k | **10/10, 207 s, 0 trunc, 20.4k** |
+| code-eval-claude | 6/6, 128 s, 41 turns | 6/6, 104 s, 35 turns | **6/6, 115 s, 33 turns** |
+| vision, 4-item tier | 3/4 (compare TRUNC) | 3/4 | **4/4** |
+| vision, compare x3 | 3/3 @ 237 tok | **0/3** | 3/3 @ **188 tok** |
+| determinism on compare | byte-identical | none | byte-identical across TWO harnesses |
+
+Q6_K reproduced its standalone compare result byte-for-byte through the router -
+188 tokens, 560 chars, three times here and three times standalone. Q4 flipped
+between conditions constantly. That is the margin difference made visible: Q6 has
+so much headroom on this item that batch geometry cannot perturb it.
+
+### What the Q4 tier cost, and why it is gone
+
+`nerkyor-eval` was removed from `router.ini` and its 20.22 GiB deleted on
+2026-08-14. It was not merely the weaker tier - it was **worse than the alias it
+was competing with**, on the one instrument that is bit-reproducible here:
+
+    Ornith vs TD-Q4    Ornith lower at 61 of 61 paired chunks   mean +0.0124
+
+The mmproj is kept: `td-q6-eval` shares it.
+
+### The trade at Q6, priced
+
+Give up ~10% of served generation, ~15% of prefill and 5.3 GiB. Get 10/10
+against 8/10 on the tier built to discriminate, with `fast` truncating twice and
+burning 93.6k chars against 20.4k; 20% fewer turns on the Claude Code surface;
+and multi-image vision at 188 tokens against `fast`'s 237.
+
+**Perplexity does not contribute to that case.** TD-Q6 and Ornith are a wash -
+51 of 61 with the ordering reversing. The argument is task results only.
+
+Not deployed. What it owes: a soak on Q6_K, not on a tier that no longer exists.
+
 ## Where this leaves Thinking-Distill
 
 It is the better model on nearly everything this box measures, and the gap on
