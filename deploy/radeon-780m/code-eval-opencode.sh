@@ -1,4 +1,15 @@
 #!/bin/bash
+# SUPERSEDED 2026-08-14 by code-eval-claude.sh. Kept, not deleted: every result
+# this tier produced is recorded in candidates.md and those numbers stay
+# readable only while the harness that made them still exists.
+#
+# Why it was replaced rather than kept alongside: opencode was uninstalled from
+# the workstation on 2026-08-11 and Claude Code is the client this box serves,
+# so this tier scores models on a tool surface nobody drives. It also runs over
+# /v1/chat/completions, where the real client speaks /v1/messages - a different
+# path through this server. Run it for continuity with an older result, not to
+# rank a candidate.
+#
 # Tier 3: score a model on what opencode actually does to it.
 #
 # The ladder, and what each rung is for:
