@@ -2285,9 +2285,14 @@ Everything that recommendation rested on was re-measured. Most of it does not
 survive, the central quality claim does, and a capability nobody had tested
 turns out to decide the question.
 
-**Verdict: `fast` keeps the alias.** Not on the margins the original writeup
-kept for it - both of those are gone - but on multi-image vision, which was
-never tested and which is the reason this slot carries an mmproj at all.
+**Verdict: `fast` keeps the alias, and the deployed Q4_K_M is the reason.** Not
+on the margins the original writeup kept for it - both of those are gone - but
+on multi-image vision, which was never tested and which is the reason this slot
+carries an mmproj at all. The correction below matters: Thinking-Distill is not
+incapable of it, its Q4_K_M tier is unreliable at it, and Q6_K is not. So the
+open question is no longer "is this model good enough for `fast`" but "is Q6_K
+affordable here", which is a throughput and pool question with a measurable
+answer.
 
 ## What the record claimed, and what it measures at today
 
@@ -2388,15 +2393,52 @@ existing test covered.
 | failure mode | - | 2 non-terminations, 1 "only one screenshot is provided" |
 
 Across all attempts today under varying conditions TD answered correctly about
-twice in eight tries; in the clean loop, never. Two of its failures state
-outright that only one screenshot was provided, which is a perception failure
-rather than verbosity. And 28.5k/31.8k chars without concluding is **the
-non-termination signature that rejected Ornith-Agents-A1-3.6, MiniMax-M2.1 and
-nerkyor's own APEX-MTP variant** - TD was legitimately cleared of it on the
-reasoning tier, 10/10 in 16k chars total, and exhibits it here.
+twice in eight tries; in the clean loop, never. And 28.5k/31.8k chars without
+concluding is **the non-termination signature that rejected
+Ornith-Agents-A1-3.6, MiniMax-M2.1 and nerkyor's own APEX-MTP variant** - TD was
+legitimately cleared of it on the reasoning tier, 10/10 in 16k chars total, and
+exhibits it here.
 
-`fast` is not merely better here: it is correct, cheap and deterministic on the
-item TD cannot do.
+### Corrected same day: it is the quant tier, not the model
+
+The paragraph above originally read this as a perception failure, citing two
+responses that stated only one screenshot was provided. **That attribution was
+wrong**, and the correction is the whole reason the Q6_K download was worth
+spending. Q6_K and Q4_K_M measured back to back, both standalone on 8081 under
+identical settings so the comparison is internally consistent:
+
+| | correct | output tokens per trial | deterministic |
+|---|---|---|---|
+| **Q6_K** | **3/3** | 188, 188, 188 | yes, byte-identical |
+| Q4_K_M | 3/3 | 1842, 1875, 2768 | no, drifts upward |
+| Q4_K_M, repeated later at the SAME settings | **0/2** | 3008 (wrong), 8000 (trunc) | no |
+| Q4_K_M through the router | **0/3** | 8000, 8000, 2035 | no |
+| `fast` through the router | 3/3 | 237, 237, 237 | yes |
+
+TD can do this task. **Quantization sets the margin, not the outcome.** Q6_K
+solves it in 188 tokens with enormous headroom and repeats byte-identically.
+Q4_K_M solves it only barely - 1.8k to 3k tokens, wandering between runs - and
+that thin margin tips into non-termination roughly half the time. The "only one
+screenshot" responses are a model reasoning past its budget, not one that cannot
+see the second image.
+
+An intermediate hypothesis, that production conditions (`parallel 3`,
+`ctx 262144`) were responsible, was tested and **rejected**: the identical
+standalone configuration scored 3/3 once and 0/2 an hour later. A
+condition-isolation sweep was started and abandoned once the baseline arm
+reproduced the failure, because Q4's intrinsic variance on this item is larger
+than any effect that sweep could resolve at two trials per condition. Do not
+retry that experiment without many more trials per cell.
+
+Method note, and it is the same one this file keeps relearning: the first
+reading pattern-matched a single contrast (router fails, standalone passes) onto
+a mechanism, exactly as the 2026-08-04 incident matched draft-KV bandwidth onto
+a fault whose scope had never been established. The control that caught it was
+running BOTH tiers standalone rather than comparing new Q6 numbers against
+Q4 numbers taken through a different harness.
+
+`fast` remains correct, cheap and deterministic on this item. So is TD at Q6_K,
+in fewer tokens than `fast` needs.
 
 ## A note on determinism, because two results depend on it
 
@@ -2440,15 +2482,26 @@ less reasoning, zero truncations against two. It needs 20% fewer turns on the
 Claude Code tool surface, where the retired opencode tier had said the opposite
 (47 turns against 32). It is 1.5 GiB leaner and marginally faster.
 
-It cannot reliably compare two images, and `fast` holds this alias because
-Hermes sends screenshots.
+At **Q4_K_M** it cannot reliably compare two images, and `fast` holds this alias
+because Hermes sends screenshots. At **Q6_K** it can, deterministically, in
+fewer tokens than `fast` needs. Neither tier is deployed to `fast` on the
+strength of that alone - the tier costs 7 GiB and this box is bandwidth-bound,
+so the throughput and pool numbers decide it.
 
-**The obvious redirect is `coder`, which is text-only.** TD serves at 34.55 t/s
-against `coder`'s 26.14 - `coder` has no MTP head, no drafter and no speculation
-at all - and adds 10/10 hard reasoning. That head-to-head was not run today and
-is the next thing worth measuring.
+Two live options, in the order they should be measured:
+
+1. **TD Q6_K for `fast`.** Clears the vision bar that Q4 failed and keeps every
+   other advantage. Costs 27.2 GiB against Ornith's 21.9 and TD-Q4's 20.2, and
+   generation here is bytes-per-token, so expect a double-digit tg loss against
+   TD-Q4 that has to be weighed against `fast`'s 33.96. Pool fit is not in
+   doubt at `models-max 1`; throughput is the question.
+2. **TD for `coder`, which is text-only** and where the vision result does not
+   apply at either tier. TD-Q4 serves at 34.55 t/s against `coder`'s 26.14 -
+   `coder` has no MTP head, no drafter and no speculation at all - and adds
+   10/10 hard reasoning. This is the cheaper win and needs no new download.
 
 The soak this candidate has owed since 2026-08-04 was deliberately **not** run.
-It answers whether TD is stable enough for `fast` under real traffic, and the
-vision result already answers whether it should have `fast` at all. It becomes
-load-bearing again only if TD is redirected to `coder`.
+It answers whether TD is stable enough for `fast` under real traffic, which was
+moot while the vision result stood against it. If either option above is taken
+up, the soak becomes load-bearing again and should be run against the tier that
+is actually being deployed - a Q4 soak says nothing about Q6.
