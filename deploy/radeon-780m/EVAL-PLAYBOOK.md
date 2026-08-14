@@ -303,47 +303,49 @@ All through the production router, same session. `fast` is the incumbent
 (Ornith-1.0-35B MTP-APEX). TD is nerkyor Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill.
 KAT is Kwaipilot KAT-Coder-V2.5-Dev, text-only.
 
-| | `fast` | TD-Q6_K | KAT-Q4_K_XL | KAT-Q6_K |
-|---|---|---|---|---|
-| size on disk | 21.9 GiB | 27.2 | **21.29** | 27.95 |
-| GTT+VRAM resident | 30.7 GiB | 36.0 | **28.9** | 35.5 |
-| tg, 1 stream | **33.96** | 30.66 | 29.01 | 26.32 |
-| pp, 1 stream | **347.8** | 296.4 | 292.0 | 289.6 |
-| perplexity | 2.0183 | **2.0079** | 2.0484 | 2.0443 |
-| reason-eval-hard | 8/10, 987 s, **2 trunc**, 93.6k | **10/10**, 207 s, 0, 20.4k | 8/10, **103/129 s**, 0, **7.4/8.8k** | 8/10 then 7/10, **1 then 2 trunc**, 394/689 s, 46/78k |
-| code-eval-hard | 6/6, 255 s, 29 turns, 14.3k | 6/6, 228 s, 31 turns, 12.2k | 6/6, **175 s**, **20 turns**, **5.9k** | 6/6, 250 s, **20 turns**, 8.9k |
-| code-eval-claude | 6/6, 128 s, 41 turns | 6/6, 115 s, **33 turns** | 6/6, 218 s, 45 turns, **1 rbe, 1 edmiss** | 6/6, 205 s, 39 turns, 0, 0 |
-| vision, compare x3 | 3/3 @ 237 tok | **3/3 @ 188 tok** | n/a, text-only | n/a |
+| | **`fast`** (Ornith) | **`coder`** | **TD-Q6_K** |
+|---|---|---|---|
+| role | production all-rounder | production coding | eval candidate |
+| on disk | 21.9 GiB | **19.06 GiB** | 27.2 GiB |
+| GTT+VRAM resident | 30.7 GiB | **24.0 GiB** | 36.0 GiB |
+| speculation | MTP, n-max 2, p-min 0.3 | **none** | MTP, n-max 2 |
+| tg, 1 stream | **33.96** | 25.71 | 30.66 |
+| pp, 1 stream | **347.8** | 312.3 | 296.4 |
+| perplexity | 2.0183 | 2.0177 | **2.0079** |
+| **reason-eval-hard** | 8/10, **2 trunc**, 987 s, 93.6k | **10/10, 0 trunc**, 254/276 s, 20.3/22.4k | **10/10, 0 trunc**, 207 s, 20.4k |
+| code-eval-hard | 6/6, 255 s, 29 turns, 14.3k | 6/6, 250 s, 31 turns, **9.5k** | 6/6, 228 s, 31 turns, 12.2k |
+| code-eval-claude | 6/6, 128 s, 41 turns | 6/6, 147 s, **31 turns** | 6/6, **115 s**, 33 turns |
+| vision (compare x3) | 3/3 @ 237 tok | **none** | **3/3 @ 188 tok** |
 
-Perplexity pairs, per-chunk over 20-80. Only one is a wash; the rest are solid:
+Perplexity pairs, per-chunk over 20-80. Only the solid ones support a claim:
 
 | pair | lower at | reading |
 |---|---|---|
-| TD-Q6 vs `fast` | 51/61, flips | **a wash** |
+| TD-Q6 vs `coder` | 61/61 | solid |
 | `fast` vs TD-Q4 | 61/61 | solid |
-| `fast` vs KAT-Q4 | 61/61 | solid |
-| `fast` vs KAT-Q6 | 61/61 | solid |
-| TD-Q6 vs KAT-Q6 | 61/61 | solid |
-| KAT-Q6 vs KAT-Q4 | 61/61, mean +0.0060 | solid but only 0.20% |
+| `fast` vs KAT-Q4 / KAT-Q6 | 61/61 | solid |
+| TD-Q6 vs `fast` | 51/61, flips | **wash** |
+| `coder` vs `fast` | 10/61, flips | **wash** |
 
-Removed 2026-08-14: TD-Q4_K_M. It lost to `fast` on perplexity at 61 of 61
-paired chunks and was unreliable on multi-image vision (0/3). Weights deleted,
-alias removed.
+Removed 2026-08-14: TD-Q4_K_M (lost to `fast` at 61/61, unreliable on
+multi-image vision), and both KAT tiers by decision after Q6 was rejected on
+measurement.
 
 Standing conclusions:
 
-- **`fast` keeps its alias.** Fastest on both axes and beaten on quality by only
-  one candidate, by not enough to pay ~10% of generation.
-- **TD-Q6 is the strongest challenger** and the only model to solve the two
-  hard-reasoning items `fast` cannot finish. Costs ~10% tg and 5.3 GiB.
-  Perplexity does **not** support it - that pair is a wash.
-- **KAT stays at Q4_K_XL.** Q6 costs 9.3% tg and 6.6 GiB, buys 0.20% perplexity,
-  and introduces non-termination.
-- **KAT is the weakest on the Claude Code tool surface** despite the best turn
-  economy on `code-eval-hard`. The tiers disagree, and the one matching your
-  client is the one to weight.
-- **Perplexity is not a capability proxy.** KAT has the best `code-eval-hard`
-  turn economy and the worst perplexity, on a code corpus, as a coding model.
+- **`fast` keeps its alias** for anything needing vision, and is the fastest
+  thing here. But it is the WEAKEST hard reasoner of the three - 8/10 with two
+  truncations and 93.6k chars, against 10/10 and ~21k for both others.
+- **`coder` is the hard-reasoning alias**, which the README got wrong for eleven
+  days. 10/10 twice, zero truncations, lightest resident footprint on the box,
+  and the best turn count on the Claude Code tier. Route reasoning here.
+- **TD-Q6 is now a narrow case.** Its whole argument was 10/10 against `fast`'s
+  8/10, and `coder` already delivers that at 12 GiB less. It is worth 5.3 GiB
+  over `fast` only if ONE alias must do hard reasoning AND vision AND tools -
+  which is a serving-topology argument (`--models-max 1` makes routing cost a
+  15-30 s swap), not a model-quality one.
+- **Perplexity is not a capability proxy.** `coder` and `fast` are a wash on
+  perplexity and 10/10 against 8/10 on the tier that matters.
 
 ### The quant-tier lesson, in both directions
 

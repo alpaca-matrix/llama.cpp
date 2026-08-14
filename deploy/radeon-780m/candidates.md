@@ -2781,3 +2781,95 @@ ahead of `coder` (332.9/29.24 against 326/26.14, and `coder` carries no
 speculation at all), but that record predates `parallel` 2 -> 3 and cannot be
 cited under the determinism rule. That head-to-head needs no download and is
 the next thing worth running.
+
+---
+
+# `coder` measured, and the record was wrong about it - 2026-08-14
+
+`coder` had never been run through this session's battery. It is a production
+alias whose last numbers date from 2026-08-03, predating `parallel` 2 -> 3, so
+under the determinism rule they could not be carried into any comparison. It
+was measured only because KAT was deleted and the summary table had a hole in
+it.
+
+**It scores 10/10 on `reason-eval-hard` with zero truncations, twice.** The
+README's capability table lists this alias as `reasoning: no`.
+
+## The correction
+
+| run | result |
+|---|---|
+| 1 | 10/10 correct, 0 truncated, 254 s, 20,345 chars |
+| 2 | 10/10 correct, 0 truncated, 276 s, 22,355 chars |
+
+That ties TD-Q6_K, the challenger this repo spent the day evaluating for the
+`fast` slot, whose entire case rested on 10/10 against `fast`'s 8/10. TD-Q6
+produced 10/10, 0 truncated, 207 s, 20,376 chars - within 31 characters of
+`coder`'s first run.
+
+`coder` carries `reasoning-format = deepseek` in `router.ini` and emits ~20k
+chars of reasoning per pass. The "no reasoning channel" line in the README is
+simply wrong, and it has been wrong while this repo searched for a model that
+could beat `fast` on exactly this axis. **The box already had one, deployed,
+for eleven days.**
+
+## Full numbers, same session as everything else
+
+| | value |
+|---|---|
+| GTT + VRAM | **24.0 GiB** - the lightest alias measured |
+| tg, 1 stream | 25.71 (range 25.67-25.71) |
+| pp, 1 stream | 312.3 |
+| perplexity | 2.0177 +/- 0.02463 |
+| reason-eval-hard | **10/10, 0 trunc**, 254/276 s, 20.3/22.4k |
+| code-eval-hard | 6/6, 250 s, 31 turns, 9,494c |
+| code-eval-claude | 6/6, 147 s, **31 turns**, 0 rbe, 0 lnum, 0 edmiss |
+| vision | none - no mmproj |
+| speculation | **none** - no MTP head, no drafter, card says do not pass --model-draft |
+
+Its tg range is the tightest measured today, 25.67-25.71, because without a
+drafter there is no acceptance variance. Every speculating alias shows a wider
+band.
+
+Paired perplexity, chunks 20-80:
+
+| pair | lower at | verdict |
+|---|---|---|
+| `coder` vs `fast` | 10/61, flips | **a wash** |
+| TD-Q6 vs `coder` | 61/61, no flips, mean +0.0099 | solid |
+
+So TD-Q6 is genuinely ahead of `coder` on raw fit, while `coder` and `fast` are
+indistinguishable - the same pattern TD-Q6 and `fast` showed.
+
+## What this does to the TD-Q6 case
+
+TD-Q6's argument for taking `fast` was that it is the only model here that
+solves the two hard-reasoning items `fast` cannot finish. That is no longer
+true. `coder` solves them too, at **24.0 GiB against TD-Q6's 36.0**, with no
+download, no soak owed and no new risk.
+
+What TD-Q6 still has that `coder` does not:
+
+- **vision** - `coder` has no mmproj and cannot take an image at all
+- **speed** - 30.66 tg against 25.71, and 33 turns against 31 on the Claude
+  tier, so comparable session latency despite the throughput gap
+
+So the honest framing of the remaining choice is narrower than it was this
+morning. TD-Q6 is worth 5.3 GiB over `fast` **only** if a single alias must do
+hard reasoning AND vision AND tools at once. If the reasoning work can be
+routed to a text-only alias, the box already covers it.
+
+The catch is `--models-max 1`: routing between `fast` and `coder` costs a
+15-30 s model swap per switch, and two clients naming different aliases evict
+each other every turn. That is the real argument for one strong all-rounder,
+and it is a serving-topology argument rather than a model-quality one.
+
+## What to do about it
+
+1. **Fix the README capability table.** `coder` reasons, and well.
+2. **Route hard reasoning to `coder` today.** It is deployed, it is the lightest
+   alias here, and it is 10/10 on the tier built to discriminate. `deep` remains
+   for work that needs 117B.
+3. Re-run this battery on any alias whose documented capabilities have never
+   been measured. `coder` was mischaracterised for eleven days and the error was
+   found by accident, while filling a hole in a table.

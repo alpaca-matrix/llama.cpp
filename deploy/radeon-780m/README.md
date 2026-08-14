@@ -1087,10 +1087,20 @@ Measured on this hardware, generation with a 2.4k-token prompt:
 
 | alias | pp | tg | vision | tools | reasoning |
 |---|---|---|---|---|---|
-| `fast` | 317 t/s | 34.6 t/s | yes | yes | yes, 8-9/10 in the hard tier (with truncations) |
+| `fast` | 348 t/s | 33.96 t/s | yes | yes | yes, but **8/10 with 2 truncations**, 987 s, 93.6k chars |
 | `assist` | 394 t/s | 32 t/s | yes | yes | no |
-| `coder` | 235 t/s | 25 t/s | no | yes | no |
+| `coder` | 312 t/s | 25.71 t/s | no | yes | **yes - 10/10, 0 truncations, ~265 s, ~21k chars** |
 | `deep` | 242 t/s | 19.6 t/s | no | yes | yes, 8/8 in 279 s |
+
+**`coder` was listed as `reasoning: no` here until 2026-08-14 and that was
+wrong.** It carries `reasoning-format = deepseek`, emits ~20k chars of reasoning
+per pass, and scores 10/10 with zero truncations on `reason-eval-hard` - twice.
+It is the strongest hard-reasoning alias on this box that is not `deep`, it is
+the lightest at 24.0 GiB resident, and the error stood for eleven days while
+this repo searched for a model that could beat `fast` on exactly that axis. Send
+hard reasoning here, not to `fast`, unless the work needs vision. `fast`/`assist`
+numbers re-measured the same day; the older 317/34.6 and 235/25 figures predate
+`parallel` 2 -> 3.
 
 A temporary `td-q6-eval` slot holds nerkyor
 Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill at **Q6_K**. **Adjudicated 2026-08-14:
