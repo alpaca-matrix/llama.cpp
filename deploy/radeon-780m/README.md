@@ -978,6 +978,17 @@ Three things to know:
 
 ## Models
 
+**Evaluating a new candidate: follow `EVAL-PLAYBOOK.md`.** It is the order of
+operations for deciding whether a model should take an alias here, and every
+rule in it exists because skipping that rule produced a wrong answer at least
+once. The short version: vet on paper, fetch with checksums, give it an eval
+stanza and never a production alias, tune the drafter per model on real prompts
+at the concurrency you serve, confirm on 8080 because the spare port lies,
+compare against the incumbent **in the same session** because temperature 0 is
+not determinism here, establish perplexity signs by paired per-chunk ordering
+rather than the final estimate, test the quant tier before blaming the model,
+and soak only what you intend to ship.
+
 Always verify checksums. Use `fetch-model.sh`, which checks the SHA256 from the
 HF API and retries. Parallel downloaders against HF's Xet CDN can produce files
 that are the correct length but byte-damaged; a damaged GGUF still loads and
