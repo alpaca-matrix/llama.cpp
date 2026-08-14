@@ -2474,6 +2474,86 @@ the host. One `Fence fallback timer expired on ring comp_1.2.1` appeared, under
 fallback poll, with no reset and no failed request. It is not the incident
 signature and should not be read as one.
 
+## What Q6_K costs, and what it buys - measured 2026-08-14
+
+The vision correction above turned the question from "is this model good enough
+for `fast`" into "is Q6_K affordable". Both halves are now measured.
+
+### Cost, on the same harness and prompts as the n-max sweep
+
+| | Q4_K_M | Q6_K | delta |
+|---|---|---|---|
+| tg, 1 stream | 36.49 | 31.36 | **-14.1%** |
+| pp, 1 stream | 358.9 | 279.2 | -22.2% |
+| aggregate, 1 stream | 19.63 | 16.10 | -18.0% |
+| tg, 2 streams | 20.86 | 17.18 | -17.6% |
+| aggregate, 2 streams | 19.99 | 15.27 | -23.6% |
+| on disk | 20.22 GiB | 27.2 GiB | +7.0 GiB |
+
+The bytes-per-token model predicts -25.7% on tg from the weight ratio alone;
+actual is -14.1%, because KV and activations do not scale with the tier. The
+arithmetic sets a ceiling here, not a forecast - same as everywhere else on this
+box.
+
+Against the incumbent, which is what the slot decision needs. Standalone reads
+about 5.6% high versus production on this model (Q4 measured 36.49 standalone
+against 34.55 through the router), so Q6_K lands near **29.7 t/s served against
+`fast`'s 33.96 - roughly 12% slower**, and 5.3 GiB heavier than Ornith's 21.9.
+
+### What it buys: better weights than `fast` has access to
+
+`llama-perplexity`, 80 chunks, `-c 512`, `/root/ppl-holdout-ornith.txt` - the
+same corpus and method as the Ornith requant work. Both models are `qwen35moe`
+with the `gpt2` tokenizer and an identical 248,320-token vocab (checked, not
+assumed), so the numbers share a denominator.
+
+| model / tier | PPL |
+|---|---|
+| **TD Q6_K** | **2.0079 +/- 0.02453** |
+| Ornith BF16 (unquantized source) | 2.0131 +/- 0.02495 |
+| Ornith APEX I-Quality (deployed `fast`) | 2.0183 +/- 0.02510 |
+| **TD Q4_K_M (deployed `nerkyor-eval`)** | **2.0245 +/- 0.02489** |
+
+The within-model delta is the clean one: **Q4 -> Q6 is worth 0.82%**. For scale,
+this file established that Ornith's entire distance from its own BF16 weights is
+0.26%, so **TD's quantization gap is 3.2x Ornith's total quantization
+headroom**. Q4_K_M is doing real damage to this model where APEX's adaptive mix
+costs Ornith almost nothing.
+
+Two consequences the record had backwards:
+
+- **TD as deployed is worse than `fast` on perplexity** (2.0245 against 2.0183).
+  Nobody had measured this; the record had TD winning on quality throughout.
+- **TD at Q6_K is better than Ornith at any tier**, including its unquantized
+  weights. "Requantizing Ornith" concluded that quantization is not a quality
+  lever on `fast` and a real upgrade has to be different weights. These are
+  those weights.
+
+It also explains the vision result mechanically. Two-image comparison is a
+marginal task for this model, and Q4 spends the margin on quantization damage:
+188 deterministic tokens at Q6 against 1,800-8,000 wandering ones at Q4.
+
+Cross-model PPL caveat, stated because it limits the second bullet: the corpus
+was built to be held out from *Ornith's imatrix*, not from either model's
+training data, and it is llama.cpp source, which is public. Contamination is
+possible and unquantified for both. The within-model Q4-vs-Q6 comparison is
+unaffected; the cross-model ordering is suggestive rather than settled, and the
+deltas sit inside the individual error bars.
+
+### The trade, priced
+
+TD-Q6 for `fast` costs ~12% of served generation and 5.3 GiB of pool, and buys
+better perplexity than `fast` can reach at any quantization, 10/10 hard
+reasoning against 8/10 at 6.6x the speed, vision parity (188 tokens against
+`fast`'s 237, both deterministic), and 20% fewer turns on the Claude Code tool
+surface.
+
+That is a real trade with a real price, not the free upgrade the 2026-08-04
+writeup described. It is not taken today. What it needs first is the soak, run
+against Q6_K rather than Q4 - a soak of the tier that is not being deployed
+proves nothing - plus a `check-vision-agentic` and `reason-eval-hard` pass on
+Q6 through the router rather than standalone.
+
 ## Where this leaves Thinking-Distill
 
 It is the better model on nearly everything this box measures, and the gap on
