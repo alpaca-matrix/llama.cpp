@@ -62,10 +62,6 @@
         "laguna-eval": {
           "name": "laguna-eval - poolside/Laguna-S-2.1 UD-IQ3_S (118B-A8B, DFlash)",
           "limit": { "context": 262144, "output": 32768 }
-        },
-        "kat-eval": {
-          "name": "kat-eval - Kwaipilot/KAT-Coder-V2.5-Dev (35B-A3B, MTP)",
-          "limit": { "context": 262144, "output": 32768 }
         }
       }
     }
