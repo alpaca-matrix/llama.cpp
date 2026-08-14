@@ -349,23 +349,26 @@ Perplexity pairs, per-chunk over 20-80:
 | coder-Q4 vs `fast` | 10/61, flips | **wash** |
 | TD-Q6 vs `fast` | 51/61, flips | **wash** |
 
-Removed 2026-08-14: TD-Q4_K_M, and both KAT tiers.
+**Lineup cut to three on 2026-08-14**: `fast`, `balanced` (Thinking-Distill
+Q6_K, the default) and `deep` (Laguna). Removed and deleted: TD-Q4_K_M, both
+KAT tiers, `coder` and its Q5 tier, `assist`, gpt-oss-120b. The table above is
+kept in full because it is the calibration a future candidate is scored
+against, and two of those models are the strongest results on it - `coder`
+matched `balanced` on reasoning at 24.8 GiB and beat `fast` on vision, and
+gpt-oss held `deep` at 10/10. Both are re-downloadable.
 
 Standing conclusions:
 
-- **`coder` + its published mmproj is the strongest all-rounder here**, and the
-  cheapest change available: 0.8 GiB for vision on the lightest alias. It beats
-  `fast` on hard reasoning (10/10 against 8/10 with two truncations) and on
-  vision (4/4 against 3/4, since `fast` truncates on the two-image item), at
-  6 GiB less. `fast` wins only on speed, +32% tg.
-- **`coder` was documented as text-only for eleven days and as `reasoning: no`
-  for the same period.** Both wrong. Verify capability claims against the GGUF
-  and the repo listing, including this repo's own.
-- **TD-Q6 is retired as a candidate.** Its last argument was being the only
-  model doing reasoning AND vision in one alias; `coder` does both at 11 GiB
-  less.
-- **`coder` Q5 is rejected.** 16% of generation and 8.4 GiB for a real 0.76%
-  perplexity gain and **zero** capability change.
+- **`balanced` is the default** on the tier this repo built to discriminate:
+  10/10 with zero truncations against `fast`'s 8/10 with two, in a fifth of the
+  wall clock, plus vision that does not truncate on the two-image item.
+- **`fast` is kept for speed only** - +11% tg and +17% pp - and is the weakest
+  hard reasoner of the three.
+- **Perplexity did not decide anything here.** `balanced` and `fast` are a wash
+  on it (51/61 with flips) and 10/10 against 8/10 on the tier that matters.
+- **This repo's own capability claims have been wrong twice** - `coder` as
+  text-only and as `reasoning: no`. Verify against the GGUF and the repo
+  listing, not the docs.
 
 ### The quant-tier lesson, across four models
 

@@ -1010,21 +1010,23 @@ been exercised past 131072 in the eval scripts yet - depth-sensitive settings
 revisiting if this box starts serving conversations that actually reach into
 the new range.
 
+**Lineup cut to three on 2026-08-14.** `coder` and `assist` were removed and
+their weights deleted, gpt-oss-120b lost `deep` to Laguna, and every eval slot
+was retired. What survives:
+
 | Slot | Model | Why |
 |---|---|---|
-| `fast` | Ornith-1.0-35B MTP-APEX + mmproj | all-rounder: reasoning, vision and tools in 21.9 GiB; see `candidates.md` for the Thinking-Distill swap + GPU-hang history |
-| `assist` | Qwen3-VL-30B-A3B-Instruct UD-Q4_K_XL + mmproj | only alias with vision; 32 t/s, 256K ctx |
-| `coder` | Qwen3-Coder-Next UD-Q4_K_XL + DFlash drafter | SWE-bench Verified 70.6 at 3B active; best agentic quality that fits |
+| **`balanced`** | Thinking-Distill Q6_K + mmproj, 27.2 GiB | **THE DEFAULT**, the only load-on-startup alias. 10/10 with zero truncations on `reason-eval-hard` in 207 s, against `fast`'s 8/10 with two truncations in 987 s. Vision, and answers the two-image compare item 3/3 in 188 deterministic tokens where `fast` truncates it |
+| `fast` | Ornith-1.0-35B MTP-APEX + mmproj, 21.9 GiB | kept for raw speed: 33.96 tg / 347.8 pp against `balanced`'s 30.66 / 296.4. Weakest hard reasoner of the three |
+| `deep` | Laguna-S-2.1 attn-IQ4_XS v3, 44.22 GiB | long-horizon autonomous coding. Text-only, no speculation (DFlash measures +0.9% for 2.2 GiB), lower quant tier than the others - weigh results accordingly |
 
-`coder` is arch `qwen3next`: a hybrid of 48 blocks where only every 4th is full
-attention (`full_attention_interval = 4`) and the other 36 are Gated Delta Net
-linear-attention layers, over 512 experts with 10 used. The GDN op is the reason
-speculation pays here beyond the usual: `GATED_DELTA_NET(head_count=32,
-head_size=128)` costs 64 us at one token but 3.6 us/token at 64 tokens, because
-the 4.2 MB of per-layer recurrent state is read and written once per call
-regardless of batch size. Clean `llama-bench` figures: pp512 227 t/s, tg64 18.5 t/s.
-Served with the DFlash drafter on a healthy box: pp 235 t/s, tg 25 t/s.
-| `deep` | gpt-oss-120b MXFP4 | 117B/5.1B active, native `reasoning_effort` |
+Deleted with the cut, and worth knowing what was given up: **`coder`** measured
+best of anything on this box on 2026-08-14 once its published mmproj was loaded
+- 10/10 reasoning AND 4/4 vision at 24.8 GiB, beating `fast` on both quality
+axes while 6 GiB lighter. **gpt-oss-120b** held `deep` at 10/10 on the hard
+tier. Both are recoverable by re-download; the measurements are in
+`candidates.md`.
+
 
 Measured on `coder` (80B-A3B, 46 GiB): pp ~210 t/s, tg 18 t/s base, 25 t/s with
 the DFlash drafter (`spec-type = draft-dflash`, 88% acceptance at n-max 3-4).
@@ -1087,13 +1089,12 @@ Measured on this hardware, generation with a 2.4k-token prompt:
 
 | alias | pp | tg | vision | tools | reasoning |
 |---|---|---|---|---|---|
+| `balanced` | 296 t/s | 30.66 t/s | yes | yes | **yes - 10/10, 0 truncations, 207 s, 20.4k chars** |
 | `fast` | 348 t/s | 33.96 t/s | yes | yes | yes, but **8/10 with 2 truncations**, 987 s, 93.6k chars |
-| `assist` | 394 t/s | 32 t/s | yes | yes | no |
-| `coder` | 312 t/s | 25.71 t/s | no | yes | **yes - 10/10, 0 truncations, ~265 s, ~21k chars** |
-| `deep` | 242 t/s | 19.6 t/s | no | yes | yes, 8/8 in 279 s |
+| `deep` | see candidates.md | 13.38 t/s | no | yes | not measured on the hard tier at this tier |
 
-**`coder` was listed as `reasoning: no` here until 2026-08-14 and that was
-wrong.** It carries `reasoning-format = deepseek`, emits ~20k chars of reasoning
+**A note kept because the lesson outlives the alias: `coder` was listed here as
+`reasoning: no` and as text-only, and both were wrong.** It carries `reasoning-format = deepseek`, emits ~20k chars of reasoning
 per pass, and scores 10/10 with zero truncations on `reason-eval-hard` - twice.
 It is the strongest hard-reasoning alias on this box that is not `deep`, it is
 the lightest at 24.0 GiB resident, and the error stood for eleven days while
