@@ -2274,3 +2274,181 @@ would justify a slot if speed were not the issue. If a download is ever spent on
 it, the point is to replace a fourth *extrapolation* of the dense penalty with a
 measurement. Expect ~6 t/s, and do not wire it into `router.ini` on the
 benchmarks above.
+
+---
+
+# Re-adjudicating Thinking-Distill for `fast` - measured 2026-08-14
+
+The `nerkyor-eval` slot has held Thinking-Distill since 2026-08-07 with one
+outstanding obligation and a standing recommendation to swap `fast` to it.
+Everything that recommendation rested on was re-measured. Most of it does not
+survive, the central quality claim does, and a capability nobody had tested
+turns out to decide the question.
+
+**Verdict: `fast` keeps the alias.** Not on the margins the original writeup
+kept for it - both of those are gone - but on multi-image vision, which was
+never tested and which is the reason this slot carries an mmproj at all.
+
+## What the record claimed, and what it measures at today
+
+| claim | recorded | measured 2026-08-14 |
+|---|---|---|
+| served throughput | ~39-41 t/s vs `fast`'s 34.6 (+13-18%) | 34.55 vs 33.96 (**+1.7%**) |
+| its own tuned draft length | n-max 4, "its own measured peak" | **n-max 2**; 4 is the worst speculated setting at two streams |
+| hard reasoning | 10/10 vs 8-9/10 | **holds** - 10/10 in 150 s vs 8/10 in 987 s |
+| code-eval-hard | `fast` ahead, 163 s / 27 turns vs 235 s / 33 | **reversed** - TD 187 s / 32 turns vs `fast` 255 s / 29 |
+| depth decay | `fast` better, 70.5% vs 68% retained | **level** - 30.2% vs 30.1% retained at 234k |
+| vision | "smoke test... worth a closer look before cutover" | **decisive, and against TD** |
+
+## The draft length was wrong, and wrong in the expensive direction
+
+Re-swept with real prompts (`spec-sweep` `PROMPT_FILE`) at one and two streams.
+The full table lives in `router.ini`'s `[nerkyor-eval]` comment. Short version:
+
+| n-max | 1 stream tg | 2 streams tg | 2 str aggregate | acceptance (2 str) |
+|---|---|---|---|---|
+| 0 (none) | 28.05 | 18.50 | 19.25 | - |
+| 2 | 36.49 | 20.86 | **19.99** | 0.847 |
+| 3 | 36.72 | 19.59 | 18.93 | 0.709 |
+| 4 (was deployed) | 36.86 | 18.03 | 15.59 | 0.730 |
+
+At one stream 2/3/4 tie inside a 1% spread against a repeat variance of 1-2%,
+measured by running the same cell twice. The original sweep read a 24% win for
+4 over 3 out of a run whose own quoted range was 32.73-40.39. At two streams the
+deployed n-max 4 was **below not speculating at all** - 18.03 against 18.50 -
+and 19% down on aggregate.
+
+Two mechanisms worth keeping. Speculation taxes prefill to subsidise
+generation, because MTP's catch-up decode runs over every prefill ubatch; on one
+config the two cancelled to the resolution of the log, with n-max 0 and n-max 1
+both landing at exactly 62.3 s wall (generation 1.7 s faster, prefill 1.7 s
+slower). And per-stream tg systematically flatters speculation on any workload
+with real prefill in it, which agentic traffic is - **aggregate is the honest
+number**.
+
+TD and `fast` landing on the same draft length is what the shared 256-expert
+top-8 verify economics predict. Both return acceptance 0.709 at n-max 3, to
+three decimals.
+
+## The column limit is settled by that, and is worth more than recorded
+
+Three slots at n-max 2 is 9 columns, inside the unit's
+`GGML_VK_MUL_MAT_VEC_ID_MAX_COLS=12`. At n-max 4 it needed 15, which the README
+forbids covering. Measured at conc 3, cols 8 vs 12, with conc-1 controls flat to
+0.05%: **+9.4% aggregate, +19.4% per-stream** - against the ~2-3% recorded for
+`fast` on synthetic prompts.
+
+## Depth: 262144 is real, and the retention claim was noise
+
+First time anything on this box has been run past 131072. Both aliases taken to
+~233,600 tokens (89% of the configured ceiling) by growing one context with
+`cache_prompt` so each step prefills only the delta.
+
+| cumulative depth | `fast` pp | TD pp | `fast` tg | TD tg |
+|---|---|---|---|---|
+| ~39k | 224.0 | 220.1 | 26.00 | 24.37 |
+| ~75k | 122.4 | 121.8 | 18.96 | 21.35 |
+| ~114k | 84.0 | 83.7 | 17.66 | 18.87 |
+| ~154k | 63.2 | 63.2 | 14.42 | 15.84 |
+| ~193k | 50.6 | 50.6 | 12.14 | 13.46 |
+| ~234k | 42.2 | 42.3 | 10.27 | 10.41 |
+
+Prefill is identical at every depth - 63.2 vs 63.2, 50.6 vs 50.6 - as the shared
+GDN-hybrid shape predicts. tg differences track draft acceptance, which is
+**content-dependent, not depth-dependent** (it wandered 0.72-0.95 in both models
+with no trend), so single-point tg comparisons at depth are noise. Retention to
+234k is 30.2% (`fast`) against 30.1% (TD): the recorded 70.5-vs-68% advantage is
+not there.
+
+Two operational facts fall out. **GTT does not grow with depth** - it is
+preallocated at `ctx-size` on load and stayed pinned at 14.7 GiB (`fast`) and
+13.2 GiB (TD) across every depth - so the load-time footprint is the worst case
+and a long conversation cannot creep the pool. And TD runs 1.5 GiB leaner.
+
+## Vision is where it is decided, and it needed a harness that did not exist
+
+`check-vision-tools.sh` names colours in a four-quadrant square. That was the
+entire vision evidence behind the swap recommendation, which said so and
+deferred the question. `check-vision-agentic.sh`, added today, puts four items
+in front of the model over `/v1/messages`: read a field value out of rendered
+pixels, locate the highlighted button, compare two screenshots differing in one
+field, and read a value then call a tool with it.
+
+`read`, `locate` and `act` pass on both models. TD reads `8080` off the pixels
+and calls `apply_port` with it - vision and tool use in one turn, which no
+existing test covered.
+
+`compare` does not. Controlled three-trial loop, identical request:
+
+| | `fast` | TD |
+|---|---|---|
+| correct | **3/3** | **0/3** |
+| output tokens | 237, 237, 237 | 8000 (trunc), 8000 (trunc), 2035 |
+| thinking | 708c, byte-identical x3 | 28,518c / 31,786c / 7,638c |
+| failure mode | - | 2 non-terminations, 1 "only one screenshot is provided" |
+
+Across all attempts today under varying conditions TD answered correctly about
+twice in eight tries; in the clean loop, never. Two of its failures state
+outright that only one screenshot was provided, which is a perception failure
+rather than verbosity. And 28.5k/31.8k chars without concluding is **the
+non-termination signature that rejected Ornith-Agents-A1-3.6, MiniMax-M2.1 and
+nerkyor's own APEX-MTP variant** - TD was legitimately cleared of it on the
+reasoning tier, 10/10 in 16k chars total, and exhibits it here.
+
+`fast` is not merely better here: it is correct, cheap and deterministic on the
+item TD cannot do.
+
+## A note on determinism, because two results depend on it
+
+Temperature 0 is not a determinism guarantee across batch geometry. `fast`
+produced byte-identical 708-char runs three times in a clean back-to-back loop,
+and truncated on the same request when it ran third in a script behind two other
+requests. Changing what precedes a request changes slot and cache state, which
+changes `MUL_MAT_ID` shapes, which changes floating-point reduction order, which
+can flip a near-tied token. The same mechanism explains `fast`'s code-eval-hard
+divergence from its 2026-08-03 baseline (255 s / 29 turns against 163 s / 27),
+which predates `parallel` 2 -> 3.
+
+**Consequence for method: compare models measured in the same session under the
+same conditions, and do not compare either against a historical number taken
+under a different slot count.** Today's `fast`-vs-TD comparisons are sound;
+`fast` against its own August 3 code-eval-hard number is not. `reason-eval-hard`
+reproduced to within 1% for both models, so this is item-specific sensitivity
+rather than general drift.
+
+## What is not in doubt
+
+Both aliases are clean on Claude Code's plumbing over `/v1/messages`: streaming
+with `tool_use` blocks, `cache_control` accepted, and prefix restore reading
+10,256 of 12,304 tokens from cache, where the residue is exactly one `ubatch`.
+Identical on both. A `TRANSPORT=oai` control on the new Claude tier returns the
+same scores and turn counts either way, so the Anthropic path costs nothing and
+any future tool-calling fault belongs to the model, not the translation layer.
+
+The box was clean across roughly five hours of heavy load including two runs to
+234k tokens: **zero ring timeouts, zero resets, zero device-wedged events** on
+the host. One `Fence fallback timer expired on ring comp_1.2.1` appeared, under
+`fast` and not TD - a late or lost fence interrupt caught by the driver's
+fallback poll, with no reset and no failed request. It is not the incident
+signature and should not be read as one.
+
+## Where this leaves Thinking-Distill
+
+It is the better model on nearly everything this box measures, and the gap on
+hard reasoning is large and reproducible: 10/10 against 8/10, 6.6x faster, 5.6x
+less reasoning, zero truncations against two. It needs 20% fewer turns on the
+Claude Code tool surface, where the retired opencode tier had said the opposite
+(47 turns against 32). It is 1.5 GiB leaner and marginally faster.
+
+It cannot reliably compare two images, and `fast` holds this alias because
+Hermes sends screenshots.
+
+**The obvious redirect is `coder`, which is text-only.** TD serves at 34.55 t/s
+against `coder`'s 26.14 - `coder` has no MTP head, no drafter and no speculation
+at all - and adds 10/10 hard reasoning. That head-to-head was not run today and
+is the next thing worth measuring.
+
+The soak this candidate has owed since 2026-08-04 was deliberately **not** run.
+It answers whether TD is stable enough for `fast` under real traffic, and the
+vision result already answers whether it should have `fast` at all. It becomes
+load-bearing again only if TD is redirected to `coder`.

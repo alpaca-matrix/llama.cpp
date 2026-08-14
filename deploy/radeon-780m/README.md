@@ -1051,9 +1051,26 @@ faster, which tells on the very long contexts an agent accumulates, but it has
 no reasoning channel of its own. Verify any new model with:
 
 ```sh
-./check-vision-tools.sh assist    # tool calling + image input
+./check-vision-tools.sh assist    # tool calling + image input, smoke test
+./check-vision-agentic.sh assist  # vision at agent depth - read/locate/compare/act
 ./probe-server.sh assist 6        # real serving throughput
 ```
+
+`check-vision-tools.sh` proves the mmproj is wired and nothing more. Run
+`check-vision-agentic.sh` before trusting vision on any alias that will serve
+screenshots: it reads rendered text out of a UI image, compares two screenshots,
+and requires a tool call carrying a value read from pixels. The two-image
+`compare` item is the one that discriminates - measured 2026-08-14, `fast`
+passes it 3/3 and Thinking-Distill 0/3, a gap the colour-swatch smoke test
+cannot see. It runs over `/v1/messages` by default because that is the path
+Claude Code and Hermes use, with `TRANSPORT=oai` as a control.
+
+The agentic-coding ladder is `code-eval.sh` -> `code-eval-hard.sh` ->
+`code-eval-claude.sh`. The last replaced `code-eval-opencode.sh` on 2026-08-14,
+when opencode stopped being a client here; it uses Claude Code's tool surface
+and enforces read-before-edit and the `cat -n` line-number convention, neither
+of which any other tier tests. The opencode tier is kept but superseded, since
+its numbers are quoted throughout `candidates.md`.
 
 Measured on this hardware, generation with a 2.4k-token prompt:
 
@@ -1065,13 +1082,27 @@ Measured on this hardware, generation with a 2.4k-token prompt:
 | `deep` | 242 t/s | 19.6 t/s | no | yes | yes, 8/8 in 279 s |
 
 A temporary `nerkyor-eval` slot (nerkyor Qwen3.6-35B-A3B-DSV4Pro-Thinking-Distill)
-holds a `fast` candidate under evaluation: ~343 t/s / ~39-41 t/s served, and
-10/10 zero-truncation on the hard reasoning tier - ahead of `fast` on both
-axes standalone, but not yet trusted with production traffic after two
-`ErrorDeviceLost` GPU hangs surfaced only under real opencode serving. Not
-load-on-startup, not wired to any client; select it with
-`"model": "nerkyor-eval"`. See `router.ini` and `candidates.md` for the full
-incident and fix history before considering it for `fast` again.
+holds a `fast` candidate. **Adjudicated 2026-08-14: `fast` keeps the alias.**
+Re-measured through the production router at a corrected draft length (n-max 4
+-> 2; 4 was worse than not speculating at all at two streams), its recorded
+throughput lead of 13-18% is really 1.7%, and the two margins the old writeup
+kept for `fast` - code-eval-hard wall time and depth decay - both reverse or
+level out. Its hard-reasoning win is real and reproduced: 10/10 in 150 s
+against `fast`'s 8/10 in 987 s.
+
+It loses the slot on vision. On a two-image "which field changed" comparison it
+scores 0/3 where `fast` scores 3/3 in 237 deterministic tokens, twice
+non-terminating at 28-32k chars of reasoning and twice reporting that only one
+screenshot was provided. `fast` holds this alias precisely because Hermes sends
+screenshots, so that is disqualifying for this slot and only this slot. The
+obvious redirect is `coder`, which is text-only, where TD's 34.55 t/s against
+`coder`'s unspeculated 26.14 and its reasoning result would both count - not yet
+measured.
+
+Not load-on-startup, not wired to any client; select it with
+`"model": "nerkyor-eval"`. Full writeup, including the determinism caveat that
+governs how any of these numbers may be compared, is in `candidates.md` under
+"Re-adjudicating Thinking-Distill for `fast`".
 
 A second temporary slot, `kat-eval` (Kwaipilot/KAT-Coder-V2.5-Dev, MTP-grafted
 UD-Q4_K_XL), holds a `coder` candidate: 332.9 t/s / 29.24 t/s served, 4/4, 6/6
