@@ -49,13 +49,26 @@ HOST="${HOST:-http://127.0.0.1:8080}"
 TRANSPORT="${TRANSPORT:-anthropic}"
 KEEP="${KEEP:-}"
 
-ALIAS="$ALIAS" HOST="$HOST" TRANSPORT="$TRANSPORT" KEEP="$KEEP" python3 <<'PYEOF'
+ALIAS="$ALIAS" HOST="$HOST" TRANSPORT="$TRANSPORT" KEEP="$KEEP" \
+MAX_TOK="${MAX_TOK:-4000}" python3 <<'PYEOF'
 import base64, json, os, re, struct, sys, urllib.request, zlib
 
 alias, host = os.environ["ALIAS"], os.environ["HOST"]
 transport = os.environ["TRANSPORT"]
 keep = os.environ.get("KEEP") or ""
-MAX_TOK = 1200
+
+# 4000, not check-vision-tools.sh's 1200. The two-image `compare` item is the
+# most reasoning-hungry thing here and a thinking model needs roughly 2.5k
+# output tokens for it: measured on nerkyor-eval, 1200 returned stop_reason
+# max_tokens with 4550 chars of thinking and NO text, which scores as a
+# capability failure and is not one. The same model answers correctly at 4000.
+# This is the trap check-vision-tools.sh's own header warns about, and the
+# first version of this script walked into it.
+#
+# Truncation is therefore reported as TRUNC, distinct from FAIL, the way
+# reason-eval-hard.sh does it: "ran out of room" and "got it wrong" are
+# different findings and collapsing them hides the difference.
+MAX_TOK = int(os.environ["MAX_TOK"])
 
 # --- 5x7 bitmap font --------------------------------------------------------
 FONT = {
@@ -169,7 +182,7 @@ def post(path, payload, timeout=600):
 
 
 def ask(images, prompt, tools=None):
-    """Send N images plus a prompt. Returns (text, tool_name, tool_args)."""
+    """Send N images plus a prompt. Returns (text, tool_name, tool_args, trunc)."""
     if transport == "anthropic":
         content = [{"type": "image",
                     "source": {"type": "base64", "media_type": "image/png",
@@ -186,7 +199,7 @@ def ask(images, prompt, tools=None):
                 text += b.get("text") or ""
             elif b.get("type") == "tool_use":
                 tname, targs = b.get("name"), b.get("input") or {}
-        return text, tname, targs
+        return text, tname, targs, r.get("stop_reason") == "max_tokens"
 
     content = [{"type": "image_url",
                 "image_url": {"url": "data:image/png;base64," + b64(p)}}
@@ -211,7 +224,7 @@ def ask(images, prompt, tools=None):
             targs = json.loads(fn.get("arguments") or "{}")
         except json.JSONDecodeError:
             targs = {}
-    return text, tname, targs
+    return text, tname, targs, r["choices"][0].get("finish_reason") == "length"
 
 
 base = dialog()
@@ -232,40 +245,46 @@ SET_TOOL = [{"name": "apply_port",
                               "properties": {"port": {"type": "integer"}},
                               "required": ["port"]}}]
 
-print(f"alias={alias}  transport={transport}")
+print(f"alias={alias}  transport={transport}  max_tok={MAX_TOK}")
 results = []
 
+def record(name, ok, trunc, detail):
+    results.append((name, ok, trunc, detail))
+
 # 1. read
-txt, _, _ = ask([base], "This is a screenshot of a settings dialog. What is the "
-                        "PORT value shown? Reply with just the number.")
-ok = bool(re.search(r"8080", txt))
-results.append(("read", ok, txt.strip()[-90:]))
+txt, _, _, tr = ask([base], "This is a screenshot of a settings dialog. What is "
+                            "the PORT value shown? Reply with just the number.")
+record("read", bool(re.search(r"8080", txt)), tr, txt.strip()[-90:])
 
 # 2. locate
-txt, _, _ = ask([base], "In this settings dialog, two buttons are shown. One is "
-                        "highlighted in blue and one is grey. Which button is the "
-                        "blue one? Reply with just the button label.")
+txt, _, _, tr = ask([base], "In this settings dialog, two buttons are shown. One "
+                            "is highlighted in blue and one is grey. Which button "
+                            "is the blue one? Reply with just the button label.")
 ok = bool(re.search(r"\bsave\b", txt, re.I)) and not re.search(r"\bcancel\b", txt, re.I)
-results.append(("locate", ok, txt.strip()[-90:]))
+record("locate", ok, tr, txt.strip()[-90:])
 
 # 3. compare
-txt, _, _ = ask([base, changed],
-                "These are two screenshots of the same dialog taken at different "
-                "times. Exactly one field's value differs. Which field changed? "
-                "Reply with just the field name.")
+txt, _, _, tr = ask([base, changed],
+                    "These are two screenshots of the same dialog taken at "
+                    "different times. Exactly one field's value differs. Which "
+                    "field changed? Reply with just the field name.")
 ok = bool(re.search(r"debug", txt, re.I)) and not re.search(r"\bport\b", txt, re.I)
-results.append(("compare", ok, txt.strip()[-90:]))
+record("compare", ok, tr, txt.strip()[-90:])
 
 # 4. act
-txt, tname, targs = ask([base],
-                        "Read the PORT value from this settings screenshot and "
-                        "apply it using the apply_port tool.", tools=SET_TOOL)
+txt, tname, targs, tr = ask([base],
+                            "Read the PORT value from this settings screenshot "
+                            "and apply it using the apply_port tool.",
+                            tools=SET_TOOL)
 ok = tname == "apply_port" and str((targs or {}).get("port")) == "8080"
-results.append(("act", ok, f"tool={tname} args={targs}"))
+record("act", ok, tr, f"tool={tname} args={targs}")
 
 print(f"{'item':<10s} {'result':>7s}  detail")
-for name, ok, detail in results:
-    print(f"{name:<10s} {'PASS' if ok else 'FAIL':>7s}  {detail}")
-passed = sum(1 for _, ok, _ in results if ok)
-print(f"\n{alias} [{transport}]: {passed}/{len(results)}")
+for name, ok, trunc, detail in results:
+    verdict = "PASS" if ok else ("TRUNC" if trunc else "FAIL")
+    print(f"{name:<10s} {verdict:>7s}  {detail}")
+passed = sum(1 for _, ok, _, _ in results if ok)
+trunced = sum(1 for _, ok, tr, _ in results if not ok and tr)
+tail = f", {trunced} truncated (raise MAX_TOK)" if trunced else ""
+print(f"\n{alias} [{transport}]: {passed}/{len(results)}{tail}")
 PYEOF
