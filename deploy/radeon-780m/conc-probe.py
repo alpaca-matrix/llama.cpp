@@ -41,9 +41,18 @@ src = open(prompt_file).read()
 if len(src) < window * (conc + rounds):
     src = src * (1 + (window * (conc + rounds)) // max(len(src), 1))
 
-busy = json.load(urllib.request.urlopen(f"{host}/slots", timeout=10))
-if any(s.get("is_processing") for s in busy):
-    print("WARNING: server is busy, results will be wrong", file=sys.stderr)
+try:
+    busy = json.load(urllib.request.urlopen(f"{host}/slots", timeout=10))
+    if any(s.get("is_processing") for s in busy):
+        print("WARNING: server is busy, results will be wrong", file=sys.stderr)
+except Exception as exc:
+    # In router mode /slots answers 400, so this check cannot run. It is
+    # advisory - never let it take the measurement down. probe-server.sh has
+    # the same check and pipes it through `grep -c`, which turns the 400 into a
+    # 0 and silently reports "not busy"; that guard has been inoperative here
+    # for as long as the box has run in router mode.
+    print(f"note: busy check unavailable ({exc}) - verify idleness yourself",
+          file=sys.stderr)
 
 
 def one(stream, rnd, out):
