@@ -3247,8 +3247,16 @@ GiB `balanced` baseline at the end.
 
 ## Disk
 
-The three candidates remain on disk at 105.5 GiB total
-(`EVAL-apex-q35-IQuality.gguf` + mmproj, `EVAL-apexmtp-q36-IBalanced.gguf`,
-`EVAL-reap30-mini.gguf`), with their stanzas still in `router.ini` as eval
-slots. Nothing here earned a production alias, so all of it is reclaimable;
-that deletion is a user decision and has not been taken.
+**Deleted 2026-08-15 by user decision, 77.11 GiB (82.8 GB) reclaimed**, and the
+three stanzas came out of `router.ini` with them - a tombstone at the end of
+that file points back here so nobody re-adds them. Disk went 45% -> 29% used,
+337 GB free.
+
+    EVAL-apex-q35-IQuality.gguf         21.25 GiB
+    EVAL-apex-q35-mmproj-F16.gguf        0.84 GiB
+    EVAL-apexmtp-q36-IBalanced.gguf     24.27 GiB
+    EVAL-reap30-mini.gguf               30.76 GiB
+
+All four are re-downloadable through `fetch-model.sh` if a reason ever appears;
+for `apexmtp` specifically there is no such reason, since its rejection has now
+reproduced twice to within 0.13% on the same failure.
