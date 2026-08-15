@@ -5,6 +5,11 @@ Researched 2026-08-02, sweeping specifically for the `deep` slot. Read
 scope and must not be re-proposed unless something material changed (noted
 inline where checked).
 
+> **On "exceeds pool" rejections:** as of 2026-08-15 that phrase is ambiguous.
+> See "Colibri" at the end of this file — for four architectures there is now
+> an engine that streams experts from disk, so the binding limit becomes the
+> 931.5 GB drive rather than the 76 GiB pool. Say which gate you mean.
+
 **Headline: nothing found beats gpt-oss-120b for `deep`.** The one candidate
 worth further attention, Qwen3.5-122B-A10B-MTP, has a genuinely better score on
 an unsaturated benchmark and a native MTP head this tree already wires for its
@@ -383,13 +388,13 @@ independent benchmark number.
 | MiniMax-M2.7 | Same `minimax-m2` arch, config confirms **62 of 62 layers still full attention**, unchanged from M2.1. DFlash drafters are now published for this point release, but the depth-collapse problem that actually killed M2.1 (65% tg drop by d32768) is architectural, not a speculation gap, and is unchanged. Not re-measured. |
 | Laguna S 2.1 | Wrong slot — SWE-bench/Terminal-Bench-tuned coding model, no GPQA/ARC-AGI evidence found. Smallest GGUF quants (INT4 ~72 GB, 4-bit GGUF ~75 GB) leave under 4 GiB of the 76 GiB pool once any KV is added — fails the practical-ceiling gate even before the slot mismatch. |
 | GLM-4.7-Flash | Already tested and rejected on this box (`failed to create MTP context`, declared-but-missing nextn tensors). Searched for a fix; found only an unrelated Jan-2026 scoring-function bug fix, no confirmation the MTP tensor gap was addressed. Not re-tested. |
-| Kimi K3 | Correction to the prior entry: arch **is now supported** in this tree (`LLM_ARCH_KIMI_LINEAR`, confirmed in `src/llama-arch.cpp`), so the earlier "no kimi_k3 arch" rejection reason is stale. Still fails on size alone — even the 1-bit Unsloth dynamic GGUF is ~594 GB, ~8x the pool. |
+| Kimi K3 | Correction to the prior entry: arch **is now supported** in this tree (`LLM_ARCH_KIMI_LINEAR`, confirmed in `src/llama-arch.cpp`), so the earlier "no kimi_k3 arch" rejection reason is stale. Still fails on size alone — even the 1-bit Unsloth dynamic GGUF is ~594 GB, ~8x the pool. **2026-08-15:** Colibri runs it at 1.6 TB streamed from disk, so "exceeds pool" is the wrong gate now — it exceeds the 931.5 GB *drive*. Still rejected, different reason; see "Colibri" at the end of this file |
 | Step-3.5-Flash (`step35`, 196B/11B) | Carried forward from the 2026-08-01 shortlist unresolved, where it was ranked for `coder`, not `deep`. Still untested. Its blocking gate is unchanged: IQ2_S is 69.2 GiB against a 76 GiB pool, leaving ~6.8 GiB for KV at 131072, and its estimated 11-18 t/s lands at or below the slot it would replace. Not re-evaluated in this deep-focused sweep — arch `LLM_ARCH_STEP35` is present in this tree. |
 | Ling-3.0-flash | **No longer rejected - see section 1.** Weights released under MIT; it is now the top-ranked `deep` candidate, blocked on arch support rather than on merit. |
 | Nemotron 3 Super | See section 3 — not rejected outright, but insufficient independently-verified evidence to shortlist; gated config, uncorroborated benchmark. |
-| Hy3 (Tencent, `hy_v3`, 295B/21B) | Exceeds pool. Unchanged from 2026-08-01. |
-| DeepSeek-V4-Flash (`deepseek4`, 284B/13B) | Exceeds pool, smallest quant 82.5 GB verified. Unchanged. |
-| GLM-4.7 full (355B) | Exceeds pool. Unchanged. |
+| Hy3 (Tencent, `hy_v3`, 295B/21B) | Exceeds pool. Unchanged from 2026-08-01. **2026-08-15:** a `UnderstandLing/Hy3-colibri-int4` container exists on HF, but `hy_v3` is not among Colibri's architecture files — verify before believing it. See "Colibri" at the end of this file |
+| DeepSeek-V4-Flash (`deepseek4`, 284B/13B) | Exceeds pool, smallest quant 82.5 GB verified. **2026-08-15: this rejection reason is retired.** Colibri implements `deepseek_v4.c` and its fp4 container is 167 GB, which fits the 337 GB free on this box today — at an estimated 1-2 t/s. The gate is now throughput and harness compatibility, not size. See "Colibri" at the end of this file |
+| GLM-4.7 full (355B) | Exceeds pool. Unchanged — and Colibri does not help, it implements GLM-**5.2**, not this. |
 | GLM-4.5-Air (106B/12B) | Fits, SWE-bench Verified 57.6 below every current slot. Unchanged. |
 | Ling-2.6-flash | Hybrid `BailingMoeV2.5` arch needs a vendor fork. Unchanged. |
 | Ling-flash-2.0 (`bailingmoe2`, 100B/6.1B) | Arch supported, superseded, no fresh agentic evidence. Unchanged. |
@@ -3260,3 +3265,220 @@ that file points back here so nobody re-adds them. Disk went 45% -> 29% used,
 All four are re-downloadable through `fetch-model.sh` if a reason ever appears;
 for `apexmtp` specifically there is no such reason, since its rejection has now
 reproduced twice to within 0.13% on the same failure.
+
+---
+
+# Colibri - a different engine, research 2026-08-15
+
+Not a model and not a llama.cpp fork. `JustVugg/colibri` (Apache-2.0, ~24.7k
+stars, pure C, one `.c` per model architecture over shared headers) is a
+separate inference engine that **streams MoE experts from NVMe** instead of
+requiring the weights to fit in memory. It claims frontier-scale models -
+GLM-5.2 744B, Inkling 975B, Kimi K3 2.8T - on consumer hardware.
+
+**The claim is true. It is also not usable here as a backend.** Nothing below
+is measured on this box; it is a desk evaluation against four numbers, three of
+which were checked on the box and one of which was not.
+
+## Why it matters to this file at all
+
+Because it retires **"exceeds pool"** as a rejection reason, which is the reason
+this file has used to desk-reject more models than any other. Every row in the
+"Rejected at research time" table that says *exceeds pool* is re-openable for
+the four architectures Colibri implements - and re-closable on disk capacity
+instead, which is a different and mostly harder gate on this box.
+
+That is the whole value. It is a research finding about the rejection table,
+not a deployment path.
+
+## What it does
+
+| mechanism | detail |
+|---|---|
+| tiering | NVMe / RAM / VRAM are placement tiers for one weight set, not a fit requirement |
+| resident | dense only - attention, embeddings, shared experts, MTP head (~9.9 GB int4 for GLM-5.2) |
+| streamed | 19,456 routed experts, ~372 GB, per-layer LRU + a **learned pinned hot-store** |
+| prefetch | `PILOT` lookahead thread; routing is **71.6% predictable one layer ahead** |
+| I/O shape | batched expert unions - one `pread` per unique expert across all batch positions, adjacent matrix storage |
+| options | `O_DIRECT` (+34% decode on some drives), dual-SSD striping (two copies = 2x read bandwidth), CUDA / Metal / **Vulkan** tiers (AMD via Mesa/RADV explicitly supported) |
+| persistence | `.coli_usage` carries routing statistics across sessions |
+
+Its stated contract is worth repeating because it is the opposite of the usual
+consumer-inference claim: *"no SLA on speed, and a hard guarantee on
+semantics"* - running short of memory makes it slow, it never silently
+re-quantizes or changes router semantics.
+
+## Published throughput, and the shape of the trade
+
+| hardware | GLM-5.2 decode |
+|---|---|
+| 6x RTX 5090, full expert residency | 5.8-6.8 t/s |
+| 128 GB CPU-only, warm cache | ~1.8 t/s |
+| single RTX 5070 Ti | 1.07 t/s |
+| 25 GB dev box, cold | 0.05-0.1 t/s |
+
+It converts a bandwidth-bound problem into an **I/O-bound** problem. That is a
+win only when the disk is close to DRAM. On this box the disk is roughly **25x
+slower** than the 59.4 GB/s that sets every generation number in the README.
+
+## Four numbers on this box that decide it
+
+Checked 2026-08-15 on the LXC and on pve2, not estimated - except the last row,
+which is a datasheet-and-experience guess and is the one worth measuring.
+
+| | |
+|---|---|
+| LXC rootfs | 496 GB, **337 GB free** |
+| pve2 thin pool | 832 GB total, 480 GB used, **352 GB unallocated** |
+| physical disk | **one** Kingston SNV3S1000G, 931.5 GB, DRAM-less Gen4 |
+| LXC memory limit | **78 GB, not 96** - 48 GB was page cache at the time of the check |
+| DRAM read | 59.4 GB/s CPU-side, ~74 GB/s GPU-side |
+| NVMe random read | **unmeasured**, assumed 2-3 GB/s at the expert block size |
+
+The 78 GB figure is the one that is easy to get wrong: `router.ini` arithmetic
+in this repo is done against the 76 GiB GPU-addressable pool, but Colibri's
+budget is the **container memory limit**, which is a different and smaller
+number than the host's 96 GB.
+
+### What fits
+
+| model | Colibri container | fits 337 GB free? |
+|---|---|---|
+| **DeepSeek-V4-Flash** 284B/13B fp4 | **167 GB** | **yes, comfortably** |
+| GLM-5.2 744B/40B int4 | ~372-380 GB | **no** - and growing the LXC disk does not rescue it, the thin pool has only 352 GB unallocated. Needs the remaining models deleted *and* discard actually returning blocks to the pool. Marginal at best |
+| Inkling 975B/41B int4 | 469 GB | no, not on a 931.5 GB drive already carrying 480 GB of thin volumes |
+| Kimi K3 2.8T MXFP4 | 1.6 TB | no - the rejection reason shrinks from "8x the pool" to "1.7x the disk", and stays a rejection |
+
+### Predicted throughput, DeepSeek-V4-Flash
+
+Roughly 10B of the 13B active is routed expert weight; at fp4 plus scales that
+is **~5.6 GB read per token**. 78 GB container minus ~12 GB dense leaves ~60 GB
+of cache against ~150 GB of experts - 65-80% hit rate if the hot-store works as
+advertised. So **~1.2-2.0 GB/token off NVMe**, at an assumed 2-3 GB/s random
+read, giving **~1-2 t/s**. Colibri's own datapoint for this model is "0.6-2+
+t/s, storage-dependent," which lands in the same place from the other
+direction.
+
+`deep` measures 15.5-19.6 t/s. A 20k-token agentic session at 1.5 t/s is
+**3.7 hours of generation alone**, before prefill.
+
+## Three places the tuning INVERTS on this hardware
+
+This is the part that does not transfer from the project's own guidance, and
+the reason this section exists rather than a link.
+
+**1. Colibri's three tiers are two tiers on a 780M.** "VRAM" and "RAM" are the
+same DDR5-5600. Placing an expert in the VRAM tier reads exactly as many bytes
+from exactly the same DRAM - it buys **zero** capacity, and the 16 GiB VRAM
+carveout is 16 GiB the expert cache cannot use. For a Colibri run the carveout
+should be **shrunk to minimum**, which is the direct opposite of the
+`ttm.pages_limit` / carveout tuning the whole README is built on.
+
+**2. CPU-only probably beats the Vulkan tier.** At 1-2 t/s, I/O is >90% of wall
+clock, so the 12 CU RDNA3 advantage over 8 Zen 4 cores (74 vs 59.4 GB/s) is
+rounding error against a 2-3 GB/s disk - while the GPU tier costs 16 GiB of the
+expert cache. Every conclusion in this repo about GPU-vs-CPU is derived from a
+bandwidth-bound regime and does not survive the bottleneck moving to storage.
+
+**3. The memory lever is the cgroup limit, not the pool.** Page cache counts
+against the container's memory limit, so expert hit rate scales with
+`pct set 250 -memory`, not with GTT. Swap must stay at 0 - swapping a streamed
+expert would be pathological.
+
+## Levers, ranked by expected effect here
+
+| lever | why |
+|---|---|
+| **a second NVMe** (`COLI_MODEL_MIRROR` + `COLI_DISK_WEIGHTS`) | two copies = 2x read bandwidth = ~2x t/s in a disk-bound regime. Largest available lever and the cheapest. Check the chassis for a free M.2 slot |
+| `PIN_GB=<n>` + `DIRECT=1` | explicit pinned pool plus `O_DIRECT` avoids double-buffering in page cache (+34% reported on some drives). Under a cgroup limit an explicit allocation is far more predictable than page cache subject to reclaim. A/B against the page-cache path |
+| `coli tune` | writes a machine-specific profile; the sanctioned starting point before hand-tuning |
+| `--topp 0.85` | reads fewer expert bytes per token at no quality cost - a direct win specifically on disk-bound machines |
+| `PILOT=1`, `PIPE=1` | on by default; the lookahead prefetch is what overlaps I/O with compute. Do not disable |
+| warm `.coli_usage` first | cold and warm runs differ by ~20x, not 20%. The determinism rule recorded for this box applies with far more force here |
+| bind-mount a raw partition | LVM-thin adds a metadata indirection on every random read and complicates discard |
+| watch NVMe temperature | sustained 100%-duty reads throttle a DRAM-less M.2 in a mini PC. `bench-guard.sh` watches the GPU and does **not** watch this |
+
+**Step 0, before downloading anything:** `fio` random read at Colibri's expert
+record size (~1-3 MB), QD 8-32, from inside the LXC. That single number
+predicts t/s within a factor. Under ~1.5 GB/s, stop there. This is the storage
+analogue of the 50 MB GGUF header range-fetch that caught two of three
+candidates on 2026-08-15 - cheap evidence before an expensive download.
+
+## Operational constraints, before anyone tries it
+
+- **Container format, not GGUF.** Nothing in this repo touches it - not
+  `fetch-model.sh`, not `router.ini`, not one eval script. Pre-converted
+  containers exist on HF (`jlnsrk/GLM-5.2-colibri-int4`,
+  `mateogrgic/GLM-5.2-colibri-int4-with-int8-mtp`,
+  `nbeerbower/Inkling-colibri-int4`), so the ~750 GB safetensors download and
+  the conversion step are avoidable.
+- **`coli serve` is OpenAI-compatible only.** No Anthropic `/v1/messages`, and
+  tool-calling support is undocumented. Claude Code is the benchmark client for
+  this deployment; this does not serve it.
+- **Exclusive use.** It cannot co-reside with a resident `llama-server` model in
+  a 78 GB container. Stop the service and confirm it drained - the D-state
+  teardown deadlock recorded in the README is the failure mode to avoid here.
+- **Not a general engine.** One hand-written `.c` per architecture:
+  `deepseek_v4.c`, `kimi_k3.c`, `inkling.c`, `olmoe.c`, plus GLM-5.2. Qwen3 MoE,
+  Kimi K2 and MiniMax are roadmap only. **No Qwen path exists**, which rules out
+  every model family currently deployed on this box.
+
+## Candidates it unlocks, and their standing
+
+**DeepSeek-V4-Flash** - 284B/13B, 167 GB, the only one that physically fits.
+Desk-rejected in the table above as *"exceeds pool, smallest quant 82.5 GB
+verified"*; that reason is retired, disk is not the gate. Re-post-trained
+2026-07-31 with large agentic gains - SWE-bench Verified 79.0 (V4-Pro 80.6),
+Terminal-Bench 2.1 61.8 -> 82.7, DSBench-FullStack 37.0 -> 68.7. **All agent
+scores are vendor figures from DeepSeek's own unreleased harness with no
+independent re-run**, which is exactly the class of claim this file has been
+burned by before. 13B active is also the highest active count ever considered
+here, and the realized-fraction table puts high active count plus MLA in the
+bad band. Est. 1-2 t/s.
+
+**Inkling** - 975B/41B, Apache-2.0, the best candidate on merit and it does not
+fit. SWE-bench Verified **77.6**, above `fast` at 75.6. Multimodal (text /
+image / audio / video pretrained, MMMU-Pro 73.5), 1M context, controllable
+thinking effort, 66 layers, 256 routed + 2 shared experts, 6 routed active.
+469 GB rules it out on this drive. This is the model that would justify a 2 TB
+NVMe if this road were ever taken.
+
+**GLM-5.2** - 744B/40B, MIT, the flagship Colibri target. SWE-bench Pro
+**62.1** (GPT-5.5 58.6), Terminal-Bench 2.1 81.0, FrontierSWE 74.4. This is the
+first candidate ever to clear the `deep` slot's stated bar of *a harder
+discriminator, not another 10/10* against everything measured here. Carries a
+native MTP head that Colibri drives at **2.2-2.8 tokens/forward** - the one
+place this repo's MTP experience transfers directly, including the failure
+mode: the **MTP head must be int8**, int4 collapses acceptance to 0-4%, which
+is the same "quantize the drafter wrong and the whole speculation win
+evaporates" result recorded for the Laguna DFlash drafter. Blocked on disk.
+
+**Hy3** (Tencent, 295B/21B) - `UnderstandLing/Hy3-colibri-int4` exists on HF,
+which is interesting because the table above rejects Hy3 for exceeding the
+pool. But `hy_v3` is **not among the architecture files** in `colibri/c`.
+Verify arch support before trusting that repo; a container on HF is not
+evidence the engine can load it.
+
+## Verdict
+
+**Do not deploy. Do not download yet.** The defensible experiment, if one is
+ever wanted, is DeepSeek-V4-Flash as an **oracle rather than a backend** - 167
+GB fits today, and one hard question answered in twenty minutes by a 284B model
+is a capability this box does not otherwise have. Gate it on the `fio` number
+above; if random read comes back under ~1.5 GB/s the experiment is not worth
+the 167 GB.
+
+The finding worth carrying forward is narrower than the engine: **on this box
+"exceeds pool" and "exceeds disk" are now different gates, and the second one
+is set by a single 931.5 GB drive that is already 57.6% allocated.** Any future
+size-based rejection should say which of the two it means.
+
+### Sources
+
+- `github.com/JustVugg/colibri` - README, `docs/quickstart.md`, `c/` tree
+- `wavect.io/blog/colibri-glm-5-2-consumer-hardware/` - the critical read
+- HF: `jlnsrk/GLM-5.2-colibri-int4`, `mateogrgic/GLM-5.2-colibri-int4-with-int8-mtp`,
+  `nbeerbower/Inkling-colibri-int4`, `UnderstandLing/Hy3-colibri-int4`,
+  `deepseek-ai/DeepSeek-V4-Flash`
+- Inkling architecture/benchmark notes: `sebastianraschka.com/blog/2026/inkling-architecture-benchmark-notes.html`
+- GLM-5.2 scores: `emergent.sh/learn/glm-5-2-benchmark`, `morphllm.com/swe-bench-pro`
