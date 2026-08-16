@@ -3713,3 +3713,93 @@ the repos checked.
 - `src/models/nemotron-h.cpp`, `src/models/nemotron-h-moe.cpp`,
   `src/models/qwen35moe.cpp`, `src/llama-model.cpp`, `src/llama-model-loader.cpp`,
   `common/speculative.cpp`
+
+---
+
+# qcn-eval deployed, and both drafters work - 2026-08-16
+
+Steps 1 and 2 of the playbook for the candidate phase 0 cleared, plus a drafter
+load test that is not a step-3 sweep. No sweep was run; draft length is still
+untuned.
+
+## What is on the box
+
+| file | size | sha256 |
+|---|---|---|
+| `EVAL-Qwen3-Coder-Next-IQ4_XS.gguf` | 39.91 GiB | VERIFIED against the HF API |
+| `EVAL-QCN-DFlash-q8_0.gguf` | 486 MiB | VERIFIED |
+| `EVAL-QCN-Eagle3-Q8_0.gguf` | 153 MiB | VERIFIED |
+
+Three stanzas in `router.ini`, all `load-on-startup = false`, all pointing at the
+same 39.91 GiB weights: `qcn-eval` unspeculated, `qcn-dflash-eval` and
+`qcn-eagle3-eval` differing only in the speculation block.
+
+Resident at ctx 262144: **16.3 GiB VRAM + 29.6 GiB GTT = 45.6 GiB**, against
+`deep`'s 44.22, inside the 76 GiB pool. Cold load 29 s, warm swap ~11 s. The
+262144 context is new ground for this model - the previous `coder` never ran
+past 131072, because the ctx bump landed 2026-08-04, the day after it lost the
+alias - and it loads without complaint.
+
+## The byte model over-predicted, by 21%
+
+`probe-server.sh qcn-eval 3`, through the production router:
+
+| | measured | predicted from 2054 MiB/token at 60.5 GB/s |
+|---|---|---|
+| pp, 1 stream | 231.1 t/s (229.6-231.2) | - |
+| tg, 1 stream | **22.06 t/s** (21.99-22.07) | 28.1 t/s |
+
+The three samples span 0.4%, so the measurement is solid and the prediction is
+what is wrong. This is the first time the bytes-per-token model has missed by
+more than a few percent on this box, and the shape of the miss points at a known
+caveat rather than a new one: **bytes saved only turn into speed if the dequant
+kernel keeps up.** Every case where the model hit its number - Laguna IQ4_XS at
++16.8% predicted +17.4% - retargeted tensors that are **read in full every
+token**. Here IQ4_XS sits on the **routed experts**, which go through Vulkan's
+`MUL_MAT_ID` path, a different kernel with a different per-byte cost.
+
+Working conclusion, to be tested rather than believed: the byte model is
+calibrated for full-read tensors and unproven for expert tensors. The clean way
+to settle it is Q4_K_M of this same model measured beside this file - 2286
+MiB/token against 2054, so the byte model says Q4_K_M should be 11% SLOWER, and
+if it comes back faster the expert-dequant explanation is confirmed and the
+whole IQ4_XS-everywhere heuristic needs narrowing.
+
+**Do not compare 22.06 against the retired unsloth UD-Q4_K_XL's 26.14.** That
+figure was taken at `parallel = 2` on an older build. This repo has already been
+burned by exactly that: `fast`'s code-eval-hard went 163 s to 255 s across the
+`parallel` 2 -> 3 change with no model change at all. A legal comparison needs
+both files measured in one session.
+
+## Both drafters load and draft, and they are not close
+
+One 160-token code completion each, same prompt, through the router, against
+`qcn-eval` unspeculated on the identical prompt:
+
+| drafter | tg | acceptance | mean draft len | verdict |
+|---|---|---|---|---|
+| none | 22.29 t/s | - | - | baseline |
+| **DFlash q8_0** | **36.56 t/s** | **0.984** (126/128) | 4.0 | works, sweep it |
+| Eagle3 Q8_0 | 23.06 t/s | 0.724 (118/163) | ~3 | works, buys ~3% |
+
+The prompt is short deterministic boilerplate, which is why DFlash accepts 98%.
+**These are not workload numbers** - they answer "does it engage", nothing more.
+What they do establish is the shape of the decision: at the same n-max 4, the
+acceptance gap is everything. 0.72 barely pays for a 5-token verify batch on a
+512-expert top-10 MoE, which is precisely the cost structure that made DFlash
+worthless on Laguna at acceptance 0.55. The likely reason for the gap is size -
+DFlash is a 0.5B block-diffusion drafter, the Eagle3 head is 145M.
+
+Both load cleanly. DFlash reports `block_size=16, mask_token_id=151669,
+n_extract=5`. Eagle3 emits `special_eos_id is not in special_eog_ids - the
+tokenizer config may be incorrect`, which nothing else on this box emits, and
+its own `context_length` is 4096 - two things to resolve before spending a sweep
+on it.
+
+## What is still owed
+
+Everything from step 3 on. Draft length is unswept and `spec-draft-n-max = 4` is
+a probe value inherited from July - every alias here that speculates peaked at
+2, and three vendors have now shipped a wrong n-max for this hardware. No eval
+tier has been run, so there is no capability claim of any kind about this model
+at this tier yet, and no same-session control against `fast` or `balanced`.
