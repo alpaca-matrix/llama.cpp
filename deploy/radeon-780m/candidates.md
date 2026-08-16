@@ -3482,3 +3482,234 @@ size-based rejection should say which of the two it means.
   `deepseek-ai/DeepSeek-V4-Flash`
 - Inkling architecture/benchmark notes: `sebastianraschka.com/blog/2026/inkling-architecture-benchmark-notes.html`
 - GLM-5.2 scores: `emergent.sh/learn/glm-5-2-benchmark`, `morphllm.com/swe-bench-pro`
+
+---
+
+# Phase 0 - Nemotron 3.5 Lightning 30B-A3B and Qwen3-Coder-Next - 2026-08-16
+
+Step 0 of `EVAL-PLAYBOOK.md` for two candidates, both bartowski imatrix repos:
+
+- `bartowski/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF`
+- `bartowski/Qwen_Qwen3-Coder-Next-GGUF`
+
+**Nothing was downloaded.** Every number below comes from 20-50 MB range
+requests against the GGUF headers, which carry the whole KV block and the full
+tensor table. Note that `gguf_dump.py` cannot read a truncated file - it
+reshapes tensor *data* and dies with a `ValueError` - so the headers were parsed
+with a standalone reader kept at `/root/phase0/ggufhead.py` and
+`/root/phase0/ggufbytes.py` on the box. Worth keeping; the playbook's `strings`
+recipe answers "is there an MTP head" but not "what does a token cost".
+
+## The two answers
+
+| | **Nemotron 3.5 Lightning 30B-A3B** | **Qwen3-Coder-Next** |
+|---|---|---|
+| verdict | **do not fetch bartowski's** - will not load | **fetch-eligible** |
+| arch | `nemotron_h_moe` | `qwen3next` |
+| arch in tree | yes, and inside the box's `build-vk2` lineage | yes, and it held `coder` until 2026-08-03 |
+| blocks | 53 = 23 SSM + 6 attn + 23 MoE-FFN + **1 MTP** | 48 = 36 GDN + 12 full attn |
+| MoE | 128 experts, top-6, 1 shared (ffn 1856 / shexp 3712) | 512 experts, top-10, 1 shared (ffn 512) |
+| native ctx | 1048576 | 262144 |
+| tokenizer | `pixtral` pre, 131072 tokens | `qwen2` pre, 151936 tokens |
+| MTP head | present in the file, **unusable in this tree** | absent |
+| vision | none published, card says "Input support: text" | none published |
+| licence | OpenMDW 1.1 (`license: other`) | Apache-2.0 |
+
+## Why bartowski's Nemotron will not load here
+
+The 53rd block is the MTP layer, and this tree does not know that. Read the
+per-layer arrays out of the header:
+
+```
+layer 51: head_count_kv=0  n_ff=1856   -> MoE-FFN
+layer 52: head_count_kv=2  n_ff=1856   -> the only layer with BOTH
+```
+
+`nemotron_h_moe` reuses `llama_model_nemotron_h::load_arch_tensors`
+(`src/models/nemotron-h.cpp:33`), which classifies each layer by those two
+arrays: recurrent if both are zero, attention if `n_ff == 0`, else MoE. Layer 52
+has a non-zero `n_ff`, so it takes the **MoE branch** and never creates
+`attn_q/k/v/output`. And `load_arch_hparams` never reads
+`LLM_KV_NEXTN_PREDICT_LAYERS` at all - only 17 archs do, and this is not one of
+them - so `hparams.n_layer_nextn` stays 0 and the four `blk.52.nextn.*` tensors
+are never created either.
+
+Eight tensors in the file, nothing claiming them, and
+`llama_model_loader::done_getting_tensors` (`src/llama-model-loader.cpp:1315`)
+throws `wrong number of tensors; expected 417, got 409` unless called with
+`partial`. `qwen35moe.cpp:43` has exactly the `mtp_only` escape hatch that would
+be needed; `nemotron-h.cpp` has none. The arch's whole graph file,
+`src/models/nemotron-h-moe.cpp`, is six lines - there is no nextn graph to run
+even if the tensors loaded.
+
+Two corroborating details: the type table maps `case 52: LLM_TYPE_31B_A3_5B`,
+i.e. this tree was written against the 52-block conversion; and bartowski built
+these with upstream **b10362**, far newer than this fork's base, with a README
+that says plainly "add `--spec-type draft-mtp`". Upstream has the support and
+this fork does not.
+
+**Unsloth's tiers are the same shape** - `UD-Q4_K_XL` is also 53 blocks with
+`nextn_predict_layers = 1`, so it fails identically, and its per-token budget is
+worse (2533 MiB against bartowski's 2234 at Q4_K_M).
+
+### There is a loadable Nemotron, and it is the slow one
+
+`ggml-org/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF` publishes a **52-block
+trunk with no MTP layer** (`block_count = 52`, `nextn_predict_layers` absent),
+matching what this tree expects, plus the MTP head as a separate sibling file.
+That trunk should load. The sibling will not - a lone `blk.52` needs the same
+`mtp_only` path nemotron-h lacks - so it would serve unspeculated, and ggml-org
+publishes only two tiers, Q4_0 (17.59 GiB) and Q8_0 (31.28 GiB).
+
+## Bytes per token, and what it predicts
+
+Method is the bytes-per-token model: every non-expert weight in full plus
+`n_expert_used / n_expert` of the routed experts, `token_embd` excluded as a
+gather, at **60.5 GB/s** because both candidates are hybrids. That constant was
+fitted on measured hybrids, so the prediction is directly comparable to a
+measured *unspeculated* tg, not a ceiling to discount.
+
+| file | size GiB | MiB/token | predicted tg | notes |
+|---|---|---|---|---|
+| Nemotron bartowski IQ4_XS | 17.62 | 1752 | **32.9** | does not load |
+| Nemotron bartowski Q4_K_M | 23.72 | 2234 | 25.8 | does not load |
+| Nemotron bartowski Q6_K | 31.94 | 2908 | 19.8 | does not load |
+| **Nemotron ggml-org Q4_0** | 17.59 | 2282 | **25.3** | loads, no speculation |
+| Nemotron unsloth UD-Q4_K_XL | 23.75 | 2533 | 22.8 | does not load |
+| **Qwen3-Coder-Next IQ4_XS** | 39.91 | 2054 | **28.1** | lead tier |
+| **Qwen3-Coder-Next Q4_K_M** | 45.38 | 2286 | **25.2** | the step-8 tier up |
+| `fast` Ornith Q6_K (control) | 21.89 | 1833 | 31.5 | measures 33.96 with MTP n-max 2 |
+| `balanced` TD Q6_K (control) | 27.19 | 1974 | 29.2 | measures 30.66 with MTP n-max 2 |
+
+The two controls are the calibration: both land within ~5% of their measured
+served figures, which is what makes the candidate rows worth quoting.
+
+Sanity check against a model that actually ran here: the retired unsloth
+Qwen3-Coder-Next UD-Q4_K_XL measured **26.14 tg unspeculated**, which back-solves
+to 2205 MiB/token - between bartowski's IQ4_XS and Q4_K_M, exactly where a UD
+mix of that size should sit.
+
+### Nemotron's quant ladder is mostly fiction
+
+`ffn_down_exps` has a row length of 1856 and `ffn_up_exps` 2688. Neither is a
+multiple of 256, so K- and I-quants cannot be applied to the tensors that are
+87% of the file, and `llama-quantize` falls back to legacy types. The evidence
+is in the ladder itself - **eight nominal tiers from IQ2_XXS to Q4_0 all land
+between 17.54 and 17.78 GiB**, a 1.4% spread - and in the type histogram of the
+Q5_K_M file, where only 18 of 417 tensors are actually K-quants against 83 Q8_0,
+63 Q5_1 and 9 Q4_0.
+
+Consequences if the loader question is ever solved: the floor is ~17.6 GiB and
+1752 MiB/token no matter what is asked for, everything below IQ4_XS is wasted
+download, and **step 8 has almost no room to run** - the tier ladder this box
+uses to repair marginal failures barely exists for this model.
+
+### Nemotron's KV is remarkably cheap, for whatever that is worth
+
+Only 6 of the 52 trunk layers are attention, at `head_count_kv = 2` and
+`key_length = 128`, so q8_0 KV costs ~0.80 GiB at 262144 and ~3.2 GiB at the
+full 1048576. The other 46 layers are Mamba2 recurrent or MoE-FFN, and recurrent
+state is per-slot and constant. A 1M-context alias is arithmetically affordable
+here for the first time. It is the generation speed that is not.
+
+## Qwen3-Coder-Next - the parts that are actually new
+
+This is the same base that held `coder` from 2026-07-31 to 2026-08-03, at
+unsloth's UD-Q4_K_XL. What differs is the quanter (bartowski imatrix, calibrated
+on 818 chunks) and the tier ladder, which reaches down to IQ4_XS at 39.91 GiB -
+**5.5 GiB lighter than Q4_K_M and 6.4 GiB lighter than the UD file that served
+here** - and IQ4_XS is the type this box has repeatedly measured as both smaller
+and faster than Q5_K on Vulkan.
+
+Pool fit at ctx 262144, `models-max 1`: 12 full-attention layers at
+`n_embd_k_gqa = 512` cost ~3.2 GiB of q8_0 KV, recurrent state for 36 GDN layers
+across 3 slots is ~0.25 GiB, so IQ4_XS lands near 45 GiB resident and Q4_K_M near
+51 GiB. Both fit the 76 GiB pool with room; `deep` at 44.22 GiB is the precedent.
+Note the previous `coder` never ran at 262144 - the ctx bump landed 2026-08-04,
+the day after this model lost the alias - so that is unverified, not inherited.
+
+**Speculation.** No `nextn` tensors anywhere in the table, and `qwen3next` has no
+nextn code path in this tree either, so "no MTP head" is consistent from both
+sides - still confirm it positively at step 3 with `SPEC_TYPE=draft-mtp` and a
+non-zero n-max, per the playbook. Three notes on drafters:
+
+- `z-lab/Qwen3-Coder-Next-DFlash` - what `coder` ran, GGUF mirrors at
+  `transmutator/...-DFlash-GGUF` and `AtomicChat/...-DFlash-GGUF`
+- `thoughtworks/Qwen3-Coder-Next-Eagle3` with a GGUF at
+  `jdluzen/Qwen3-Coder-Next-Eagle3-GGUF` - **never tested on this box**, and
+  `draft-eagle3` is in this tree's spec-type map
+- fetch either one quantized, never at BF16 - a BF16 drafter eats the whole
+  speculation win
+
+## Cross-model perplexity is unavailable for both candidates
+
+`fast` and `balanced` share a tokenizer - `qwen35` pre, 248320 tokens, identical
+SHA over the token list - which is why their paired-chunk comparisons are legal.
+Both candidates differ: Qwen3-Coder-Next is `qwen2` pre at 151936, Nemotron is
+`pixtral` pre at 131072. Step 7 can therefore only be run **within** a candidate,
+tier against tier. Neither can be pitted against an incumbent on perplexity at
+all, which raises the weight on `reason-eval-hard` - and after 2026-08-15 that is
+no loss.
+
+## Verdict
+
+**Nemotron 3.5 Lightning: do not fetch.** Not rejected on merit - it has never
+been measured. It is blocked, and the block is in this repo, not in the model.
+Three ways forward, none of them free:
+
+1. Port `nemotron_h_moe` nextn support from upstream b10362 - read
+   `LLM_KV_NEXTN_PREDICT_LAYERS`, exclude the MTP layers from the trunk loop, add
+   the `mtp_only` sibling path and the nextn graph. That is a new pattern in an
+   arch file, so `AGENTS.md` says ask before writing it.
+2. Serve ggml-org's 52-block Q4_0 trunk unspeculated at ~25 t/s. That is below
+   `fast` (33.96) and `balanced` (30.66) on the only axis this model was
+   shortlisted for, so it needs a capability argument to be worth 17.6 GiB.
+3. Wait for the fork to sync upstream, which settles it for free.
+
+**Qwen3-Coder-Next: fetch-eligible, IQ4_XS first.** It clears every paper gate -
+arch proven on this box, MoE, fits the pool, permissive licence, a real drafter
+available. What it does not clear is the reason it lost the alias in the first
+place: at ~28 t/s predicted it is slower than both incumbents, and the last time
+this box measured it, it was 26.14 against `fast`'s 33.96. Fetch it if the
+question is "can a purpose-built 80B coder beat a 35B generalist at agentic
+coding", which `reason-eval-hard` and `code-eval-claude` can answer. Do not fetch
+it expecting speed.
+
+## One correction to the record
+
+The tombstone added to `router.ini` on 2026-08-16 describes the removed
+`coder-eval` as "Qwen3-Coder-Next 80B-A3B UD-Q4_K_XL (19.06 GiB) + its Q8_0
+mmproj (0.57 GiB)". The size, the mmproj and the alias history all belong to
+`nerkyor/Qwen3.6-35B-A3B-DSV4Pro-SFT-GPT56Sol-RL-Agent-GGUF`, which is what that
+stanza's own header block says it was. Qwen3-Coder-Next is a different model that
+held `coder` earlier and is listed correctly under "Retired" at the top of the
+same file. Only the name in the tombstone is wrong.
+
+## What was verified vs. inferred
+
+**Verified from the GGUF headers**: every architecture number in the tables,
+per-layer type arrays, tensor names and types, tokenizer identity and token-list
+SHA, file sizes from the HF tree API, and the byte budgets.
+
+**Verified from this tree**: that `nemotron_h_moe` and `qwen3next` are both in
+`llama-arch.cpp` and both inside `8eef5068f`'s ancestry, so the box's serving
+binary has them; that `nemotron-h.cpp` reads no nextn key and creates no nextn
+tensors; that `done_getting_tensors` throws on an under-count; that
+`draft-eagle3` and `draft-dflash` are in the spec-type map.
+
+**Inferred, not verified**: that the load actually fails with that message - the
+reasoning is a code read, not a failed load, because confirming it costs a 17.6
+GiB download. That ggml-org's 52-block trunk loads and runs correctly. Every
+predicted tg figure. That neither model has a published mmproj anywhere beyond
+the repos checked.
+
+### Sources
+
+- HF API `models/`, `models/*/tree/main?recursive=true`, `commits/main` for both
+  repos plus `ggml-org/`, `unsloth/` and the drafter repos
+- Range-fetched headers: bartowski Q4_K_M / Q5_K_M / Q6_K / IQ4_XS and
+  `mtp-...-Q8_0`, ggml-org Q4_0, unsloth UD-Q4_K_XL, bartowski Qwen3-Coder-Next
+  Q4_K_M / IQ4_XS
+- `src/models/nemotron-h.cpp`, `src/models/nemotron-h-moe.cpp`,
+  `src/models/qwen35moe.cpp`, `src/llama-model.cpp`, `src/llama-model-loader.cpp`,
+  `common/speculative.cpp`
