@@ -1127,6 +1127,23 @@ the cut in the first place. Re-downloadable; promoting it would need the full
 playbook against today's `balanced` in the same session, plus the soak it has
 never had.
 
+**Three eval slots added 2026-08-17, at step 0 only.** Nothing below has been
+swept, measured or scored - these are `load-on-startup = false` stanzas plus a
+paper verdict, and the numbers are byte-model predictions. Full reasoning is in
+each stanza in `router.ini` and in `candidates.md`.
+
+| Slot | Model | Step 0 verdict |
+|---|---|---|
+| `gemma4-eval` | google/gemma-4-26B-A4B-it Q4_K_M + mmproj + its own MTP drafter, 17.4 GiB | **PASS.** 128 experts top-8, vision, apache-2.0, 262144 native ctx, 5:1 windowed attention. Predicted 11.1-18.5 t/s unspeculated - slower than `balanced`, at ~21-22 GiB resident, which would be lighter |
+| `mythos-eval` | squ11z1/Mythos-nano Q6_K, 2.36 GiB | **FAIL - dense.** 3.1B, no MTP head, no mmproj. Predicted 12.4-20.7 t/s, i.e. no faster than a 35B MoE. Wired up by request to confirm the paper call |
+| `gemma4-12b-eval` | yuxinlu1 agentic fine-tune of gemma-4-12B-it Q6_K + grafted MTP, 9.5 GiB | **FAIL - dense.** 12B, predicted 3.2-5.4 t/s against `balanced`'s measured 30.87. The dense FFN alone is 6.97 of its 9.77 GB per token. Wired up by request |
+
+The one architectural fact worth carrying out of that vetting: gemma4's MTP
+drafter is a **separate** model (arch `gemma4-assistant`, wired with
+`spec-draft-model`), and this tree's MTP driver has a dedicated mode for it that
+**shares the target's KV cache** instead of maintaining its own. That removes the
+catch-up-decode-over-every-prefill-ubatch cost that both other speculating
+aliases here pay.
 
 Measured on `coder` (80B-A3B, 46 GiB): pp ~210 t/s, tg 18 t/s base, 25 t/s with
 the DFlash drafter (`spec-type = draft-dflash`, 88% acceptance at n-max 3-4).

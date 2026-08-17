@@ -40,9 +40,9 @@ Costs nothing and rejects most candidates.
 
 | check | how | reject if |
 |---|---|---|
-| arch supported | `grep LLM_ARCH src/llama-arch.cpp` | not in this tree |
+| arch supported | `strings build-vk2/bin/libllama.so \| grep -x <arch>` | not in the **serving** library, not merely absent from the tree |
 | pool fit | file size + KV at target ctx vs 76 GiB | over, at `models-max 1` |
-| dense or MoE | expert tensors in `gguf_dump.py --no-tensors` | **dense** - four rejections here, ~4-8 t/s |
+| dense or MoE | expert tensors in `gguf-header.py` | **dense** - four rejections here, ~4-8 t/s |
 | tokenizer | `tokenizer.ggml.model` + token count | differs from the incumbent, if you want cross-model perplexity |
 | MTP head | `blk.N` beyond `block_count - 1` | absent means no speculation, ~30% off tg |
 | vision | mmproj published? | absent, if the target alias serves screenshots |
@@ -56,14 +56,48 @@ tokenizer and vocab size, the chat template, and every tensor name:
 ```sh
 curl -sL -r 0-52428800 -o /tmp/head.gguf \
   "https://huggingface.co/<repo>/resolve/main/<file>.gguf"
-strings /tmp/head.gguf | grep -o 'blk\.[0-9]*\.nextn[a-z_.]*' | sort -u   # MTP head
-strings /tmp/head.gguf | grep -o '^blk\.[0-9]*\.' | grep -o '[0-9]*' | sort -n | tail -1
+./gguf-header.py     /tmp/head.gguf   # all KV + every tensor name/shape/type
+./bytes-per-token.py /tmp/head.gguf   # active bytes/token and the tg ceiling
 ```
+
+**Do not reach for `gguf_dump.py` here - it cannot read a prefix at all.**
+`GGUFReader` builds numpy views over the tensor data during construction, so
+every truncated file dies with `cannot reshape array of size N into shape (...)`
+before printing a single field. That is why this section used to fall back to
+`strings`, which answers the MTP-head question and nothing else.
+
+`gguf-header.py` parses the KV block and tensor-info table directly and stops at
+the data section, so it works on a prefix and on a whole file alike. It prints
+the full KV (truncating only the token/score/merge arrays to their lengths), the
+`blk.N` index range, and the unique tensor-name patterns with shape and quant
+type - which is where "does this have an MTP head" and "is this dense" get
+answered in one read. `bytes-per-token.py` then computes the throughput estimate
+from that same table, weighting `*_exps` tensors by
+`expert_used_count / expert_count` and counting everything else in full, so the
+prediction comes from real shapes and real quant types rather than from a file
+size and an assumed active fraction.
 
 50 MB answers the questions that decide whether to spend 30 GB. Used
 2026-08-15 on three candidates: it found two of them had their MTP head dropped
 in conversion, which set the whole session's expectations before a byte of
-weights was fetched. Do this before every fetch.
+weights was fetched. Used again 2026-08-17 on three more, where it settled two
+dense rejections and, on the one that passed, established from the header alone
+that the drafter was a separate `gemma4-assistant` model rather than an in-file
+head. Do this before every fetch.
+
+**Check the chat template too, while the header is open.** It costs one grep and
+it decides how the model's reasoning and tool calls will be parsed. On 2026-08-17
+the two gemma4 candidates were confirmed to hit llama.cpp's native `peg-gemma4`
+parser (detection is the `'<|tool_call>call:'` literal in `common/chat.cpp`) and
+the CURRENT template variant rather than the compatibility-workaround path, and
+that their reasoning arrives on `<|channel>thought` .. `<channel|>` rather than
+in a `<think>` tag - so `reasoning-format` was not going to do what the other
+stanzas use it for.
+
+**And confirm the arch against the SERVING library, not the source tree.** The
+tree and `build-vk2` can differ by weeks. `strings build-vk2/bin/libllama.so |
+grep -x <arch>` answers it in one command; the source having the arch proves only
+that a rebuild would.
 
 **Throughput estimate.** `tg_ceiling = bandwidth / (active_params x bytes_per_param)`,
 using **60.5 GB/s for a GDN hybrid** and 70 GB/s otherwise. Realised fraction
@@ -120,8 +154,18 @@ on 2026-08-07.
 > catches a wrong assumption: `coder` was documented here as text-only for
 > eleven days and its GGUF repo ships an mmproj the whole time, so "no MTP head"
 > from the same source deserves the same scepticism. Check for a block beyond
-> `block_count - 1` in `gguf_dump.py --no-tensors`, and check the repo listing
-> for an mmproj, before believing any capability claim in this repo's own docs.
+> `block_count - 1` in `gguf-header.py`, and check the repo listing for an
+> mmproj, before believing any capability claim in this repo's own docs.
+>
+> **The head may not be in the file at all.** Gemma 4 publishes it as a separate
+> model of arch `gemma4-assistant` (`nextn.pre_projection` /
+> `nextn.post_projection`, `nextn_predict_layers` 4), wired with
+> `spec-draft-model` the way an external drafter is. So "no block beyond
+> `block_count - 1`" means "no head in THIS file", not "no MTP" - check the repo
+> listing for an `mtp-*` file before concluding a model cannot speculate. Note
+> also that this shape shares the target's KV (`is_mem_shared` in
+> `common/speculative.cpp`), so it costs no draft KV and the `n_max` clamp to
+> `nextn_predict_layers` does not apply to it.
 
 > **Confirm "no MTP head" positively, not by absence.** Point spec-sweep at the
 > file with `SPEC_TYPE=draft-mtp` and a non-zero n-max: if there is no head the

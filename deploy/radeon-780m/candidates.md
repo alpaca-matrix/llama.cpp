@@ -4414,3 +4414,178 @@ taken from a broadcasting op.
 **Not attempted**: DIMM temperature under sustained load (`sensors` is not
 available in the LXC, it needs the host at 192.168.254.222), and the ROCmFP4
 port itself.
+
+---
+
+# Three candidates vetted on paper: Gemma 4 26B-A4B, Mythos-nano, Gemma 4 12B agentic - 2026-08-17
+
+Step 0 of `EVAL-PLAYBOOK.md` on three models, done entirely from GGUF headers
+range-fetched at 50 MB each - no weights were downloaded to reach any verdict
+below. One passed, two failed, and all three were then given eval stanzas
+because the user asked for aliases on all three after seeing the verdicts.
+
+**No throughput, no eval tier, no perplexity and no sweep exists for any of them
+yet.** Every t/s figure here is the bytes-per-token prediction, which on the last
+candidate hit its Q6_K tier to 2% and missed its IQ4_XS tier by 21%. Read them as
+ceilings.
+
+## The header-only method, and a tool the box was missing
+
+The playbook's `curl -r 0-52428800` recipe works, but `gguf_dump.py` cannot read
+the result: `GGUFReader` builds numpy views over the tensor data and dies with
+`cannot reshape array of size 36592449 into shape (262144, 2310)` on every
+truncated file. The playbook's fallback is `strings`, which answers the MTP-head
+question and nothing else.
+
+`ggufhdr.py` and `bytespertok.py` (in `/root/hdr` on the box) parse the KV block
+and tensor-info table directly and stop at the data section, so a 50 MB prefix
+yields the full metadata plus every tensor name, shape and quant type. That is
+what produced the per-token byte tables below - the active-bytes figure is
+computed from the real tensor table, weighting `*_exps` tensors by
+`expert_used_count / expert_count` and counting everything else in full, rather
+than estimated from a file size.
+
+## 1. bartowski/google_gemma-4-26B-A4B-it-GGUF - PASSES
+
+| check | finding |
+|---|---|
+| arch | `gemma4`, present in this tree and in the serving `libllama.so` |
+| MoE | **128 experts, top-8**, 30 blocks, ~4B active of 26B |
+| attention | 5:1 windowed, `sliding_window` 1024; 5 of 30 layers full attention |
+| ctx | 262144 native (`gemma4.context_length`) |
+| vision | mmproj published, `gemma4v` projector, 27 blocks, 1.11 GiB f16 |
+| MTP | separate 420M `gemma4-assistant` drafter, `nextn_predict_layers` 4 |
+| tokenizer | `gemma4` / 262144 |
+| licence | apache-2.0 |
+| tools | native `peg-gemma4` parser, current template variant |
+
+Per-token bytes from the tensor table, at 70 GB/s:
+
+| tier | file | active bytes/token | ceiling | realised band |
+|---|---|---|---|---|
+| Q4_K_M | 15.85 GiB | 2.835 GB | 24.7 t/s | 11.1 - 18.5 |
+| Q6_K | 21.28 GiB | 3.555 GB | 19.7 t/s | 8.9 - 14.8 |
+
+Where the Q4_K_M bytes go, and this is the interesting part:
+
+| group | total | active bytes/token | share |
+|---|---|---|---|
+| all 128 experts | 14.09 GiB | 0.946 GB | 33% |
+| attention | 0.82 GiB | 0.883 GB | 31% |
+| tied LM head / embd | 0.56 GiB | 0.606 GB | 21% |
+| dense FFN | 0.37 GiB | 0.399 GB | 14% |
+
+**67% of per-token bytes are not experts.** That is the KAT profile again (68%
+there) and it means the lever on this model is attention and the head, not the
+expert tier - dropping the experts a tier can win at most a third of the budget.
+The `deep` requant that bought ~18% by extending IQ4_XS across the per-token
+reads is the precedent, with the 2026-08-17 caveat that IQ4_XS costs 21% against
+its own prediction on routed experts specifically.
+
+Resident estimate at Q4_K_M: 15.85 weights + 1.11 mmproj + 0.43 drafter + ~3 GiB
+KV at 262144 with q8_0 + graph, so **21-22 GiB, under `balanced`'s 27.2** - with
+the same two capabilities (vision, 262144 ctx) that made `balanced` the default.
+
+### The drafter shares the target KV, which is new here
+
+This is the first candidate whose MTP head ships as a separate model. It is arch
+`gemma4-assistant`: 4 blocks, `embedding_length` 1024, `embedding_length_out`
+2816 matching the target's `embedding_length`, plus `nextn.pre_projection`
+[5632, 1024] and `nextn.post_projection` [1024, 2816]. It wires in with
+`spec-draft-model`, not by being inside the main file.
+
+`common/speculative.cpp:1306-1312` documents three MTP modes and selects on
+whether the draft context's `ctx_other` is the target context:
+
+- `is_mem_shared` (gemma4) - **shares the target KV**, runs the heads in one
+  graph, and drafts every token at the same position (referencing HF's own
+  gemma4_assistant docs at `common/speculative.cpp:1683`).
+- `chain_heads` (step35) - one trained head per draft step, and the only mode
+  that clamps `n_max` to `nextn_predict_layers`.
+- neither (qwen35 / qwen35moe, i.e. `fast` and `balanced`) - a single head.
+
+Two consequences. First, the draft context does not maintain KV of its own, so
+the catch-up decode over every prefill ubatch - the mechanism the 2026-08-04 hang
+investigation turned on, and the reason `spec-draft-type-k/v = q8_0` is pinned on
+both speculating aliases - does not apply to this alias at all. Second, `n_max`
+is unclamped here, so it stays a free sweep parameter despite the drafter having
+4 heads.
+
+`spec-draft-type-k/v` are still set to `q8_0` in the stanza, to agree with the
+target's cache type rather than to save memory.
+
+### What it cannot do, and what was deliberately left undone
+
+Its tokenizer is `gemma4`/262144 against the incumbents' `qwen35`/248320, so
+**cross-model paired perplexity is unavailable** - the same hole Qwen3-Coder-Next
+had, leaving within-model tier pairs as the only clean comparison. And Q6_K was
+**not fetched**: it is the step-8 escalation if a capability failure appears at
+Q4_K_M, and fetching it now would prejudge that.
+
+## 2. squ11z1/Mythos-nano - FAILS on dense
+
+`qwen2`, 36 blocks, 3.1B, **no expert tensors anywhere in the table**. Base is
+WeiboAI/VibeThinker-3B, a math and competition-reasoning model; licence mit.
+
+At Q6_K: 2.532 GB per token -> **ceiling 27.6 t/s, realised 12.4-20.7**. The
+whole point of the dense rejection is visible in that one line - a 3.1B dense
+model is no faster on this box than `balanced`, a 35B MoE, because bandwidth sees
+parameters read per token and not parameters held. 1.86 GiB of its 2.36 GiB is
+dense FFN.
+
+Also: no MTP head (blk 0..35 against `block_count` 36 - to be confirmed
+positively per step 3 by pointing spec-sweep at it and watching the load fail),
+no mmproj, `context_length` 131072 rather than 262144, and tokenizer gpt2/qwen2
+151936 so no paired perplexity against the incumbents. Its template carries
+qwen2-style `<tool_call>` JSON tools but no thinking channel.
+
+## 3. yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF - FAILS on dense, widest margin measured
+
+`gemma4`, 48 blocks, 12B, **no expert tensors**. Inherits the good gemma4
+structure - 5:1 windowed attention, 262144 native ctx, native `peg-gemma4` tool
+calling, `<|channel>thought` reasoning - and none of it matters:
+
+At Q6_K: 9.770 GB per token -> **ceiling 7.2 t/s, realised 3.2-5.4**, against
+`balanced`'s measured 30.87. The dense FFN alone is 6.97 GB of that 9.77, which
+is why this is a model-shape rejection and not a quant-tier question: Q3_K_M
+would still only reach ~11 t/s ceiling, and speculation cannot close a 3x gap.
+No mmproj is published.
+
+Its drafter is a **graft**, the KAT situation: the file is
+`MTP/gemma-4-12B-it-MTP-Q8_0`, the head for the BASE `gemma-4-12B-it`, against a
+target that is a fine-tune of it. It pairs dimensionally - `gemma4-assistant`,
+`nextn_predict_layers` 4, `embedding_length_out` 3840 matching this target's
+`embedding_length` 3840, same tokenizer - so it should load and share KV as the
+26B's does, at an acceptance below a co-trained head (KAT's graft managed 0.76
+against `fast`'s 0.85-0.87).
+
+Two provenance flags, neither disqualifying: the GGUF carries no
+`general.license` and no `base_model` metadata (`general.name` is only "Gemma4 v2
+Merged Fp16"), and it sets `tokenizer.ggml.suppress_tokens [258883, 258882]`,
+which nothing else here does.
+
+## What was verified vs. inferred
+
+**Verified from GGUF headers on the box**, never from a model card: every arch,
+block count, expert count and top-k, sliding-window pattern, context_length,
+tokenizer model and vocab size, tensor name/shape/quant-type table, and the
+presence or absence of an MTP head and an mmproj. Also that `gemma4` and
+`gemma4-assistant` are in the **serving** `libllama.so` (checked by string
+against the built library, not inferred from the source tree), that both gemma4
+templates hit llama.cpp's `peg-gemma4` detection literal and the current variant
+rather than the compatibility-workaround path, and that the 12B drafter's
+`embedding_length_out` matches its target.
+
+**Verified from the source tree**: the three MTP modes and that `is_mem_shared`
+is selected by `ctx_other == ctx_tgt`; that `n_max` is clamped only under
+`chain_heads`; that `spec-draft-model` is the router key for a separate drafter.
+
+**Predicted, not measured**: every t/s figure, and the ~3 GiB KV and 21-22 GiB
+resident estimates for `gemma4-eval`. The realised band 0.45-0.75 is the
+playbook's, and the last candidate showed it can be wrong by 21% on an IQ-family
+tier.
+
+**Not attempted**: any sweep, eval tier, perplexity run or load test. The three
+stanzas have never been loaded. `gemma4-eval` still owes step 3 before any tier
+result means anything, and the two dense candidates owe the positive
+no-MTP-head confirmation.
