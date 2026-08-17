@@ -451,19 +451,30 @@ answers. **Two were surprises against the prior. None could have been inferred.*
 | TD | 0.82% | **fixed** multi-image vision, 0/3 -> 3/3 deterministic | ship the higher tier |
 | KAT | 0.20% | **broke** termination, 0 -> 3 truncations over two runs | keep Q4 |
 | `coder` | 0.76% | **nothing** - same score, truncations, turns and vision | keep Q4 |
+| QCN | 0.62% | **fixed** termination (2 stalled tasks, both coding tiers 5/6 -> 6/6) **and broke** tool discipline (0 -> 2 read-before-edit, 0 -> 3 edit misses) | irrelevant, loses at both tiers |
 
 **Perplexity gain does not predict capability gain.** TD's 0.82% fixed a task
 failure; `coder`'s 0.76% - almost the same magnitude, solid at 61/61 - changed
 nothing at all. And KAT's *smallest* PPL gain came with the *largest* behaviour
 change, in the wrong direction.
 
-The one effect that has been consistent: **a higher tier repairs marginal
-tool-discipline failures.** It fixed TD's multi-image comparison and KAT's
-read-before-edit violation and edit miss. Where nothing was marginal, as on
-`coder`, it did nothing.
+**That "consistent effect" is now withdrawn.** Through four models the rule read
+"a higher tier repairs marginal tool-discipline failures" - TD's multi-image
+comparison, KAT's read-before-edit violation and edit miss. QCN broke it in both
+directions at once on 2026-08-17: the higher tier repaired **termination** (two
+tasks that stalled out at Q4-class now pass in 4 and 13 turns) while *creating*
+tool-discipline failures that were not there (0 -> 2 read-before-edit, 0 -> 3
+edit misses). What survives is weaker and vaguer: a higher tier moves whatever
+was marginal, and the direction is not predictable.
+
+**The failure's shape does not tell you whether the tier is responsible.** This
+is the expensive lesson of 2026-08-17. QCN's IQ4_XS failures were read, at the
+time, as pointing away from quantization - discipline was perfect, so the lever
+that had always worked on discipline looked irrelevant. That inference was
+wrong; both failures were the tier. Do not reason from signature to cause.
 
 So: measure the tier, do not infer it - not from perplexity, not from another
-model, not from the same model's other tiers. And **re-run `reason-eval-hard`
-after any requant**, because termination behaviour moved on KAT where its
-perplexity barely did.
+model, not from the same model's other tiers, not from the shape of the failure.
+And **re-run `reason-eval-hard` after any requant**, because termination
+behaviour moved on KAT where its perplexity barely did.
 

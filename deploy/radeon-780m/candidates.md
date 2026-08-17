@@ -4085,3 +4085,234 @@ from what the two hanging setups have in common, not a code read or a bisect. No
 attempt was made to locate the bug in the source.
 
 **Not attempted**: Eagle3 n4 at two streams, perplexity, vision, soak, depth.
+
+---
+
+# The step-8 tier test on Qwen3-Coder-Next: Q6_K - 2026-08-17
+
+Run the same day as the IQ4_XS rejection above, by user request, to close the
+one question that rejection left open: **was the quantization doing the
+damage?**
+
+**Yes, and the answer is unambiguous.** Both coding-tier failures were the tier,
+not the model. And it changes nothing about the verdict, because the tier that
+fixes them costs a fifth of generation and a third of prefill.
+
+This is the fifth model to run the Q4-against-one-tier-up experiment on this
+box, and the fifth different answer.
+
+## What was fetched
+
+| file | size | sha256 |
+|---|---|---|
+| `EVAL-QCN-Q6_K-00001-of-00002.gguf` | 37.24 GiB | VERIFIED against the HF API |
+| `EVAL-QCN-Q6_K-00002-of-00002.gguf` | 24.04 GiB | VERIFIED |
+
+`bartowski/Qwen_Qwen3-Coder-Next-GGUF`, `Qwen_Qwen3-Coder-Next-Q6_K/`, 61.27 GiB
+across two split parts. Point `model` at part 1; llama.cpp resolves part 2 from
+the naming convention. Download ran at ~20 MiB/s, about 52 minutes for both.
+
+**It fits, with less headroom than anything else that has served here.**
+Resident is **66.92 GiB - 50.93 GiB GTT plus 15.99 GiB VRAM** - against the 76
+GiB pool. For scale, the IQ4_XS tier sat at 45.6 GiB and `deep` at 44.22. Cold
+load 70 s, against IQ4_XS's 29 s.
+
+**`cache-ram` had to come down to 4096 for this stanza**, against the 24576
+every other stanza carries. At ~67 GiB resident, a 24 GiB RAM prompt cache
+ceilings at ~91 GiB against the 78 GB this LXC can see, and a prompt cache that
+cannot be backed is an OOM waiting for a long session. Nothing measured below is
+obviously prompt-cache sensitive - the probes run `cache_prompt: false` and the
+agentic tiers grow one short conversation - but it is a real difference from the
+control and it is recorded rather than buried.
+
+## Measured, through the router, one session, control re-measured
+
+| | **IQ4_XS** | **Q6_K** | **`balanced`** |
+|---|---|---|---|
+| resident | 45.6 GiB | 66.9 GiB | 27.2 GiB |
+| pp, 1 stream | 243.2 | 163.5 | **293.2** |
+| tg, 1 stream | 22.29 | 17.94 | **30.87** |
+| per-stream tg, 2 streams | 14.09 | 11.50 | **17.75** |
+| aggregate, 2 streams | 13.49 | 10.00 | **15.24** |
+| reason-eval-hard | 9/10, 41 s | 9/10, 57 s | **10/10**, 206 s |
+| code-eval-hard | 5/6, 238 s, 67 turns | **6/6**, 229 s, 43 turns | 6/6, 199 s, **31 turns** |
+| code-eval-claude | 5/6, 240 s, 108 turns | **6/6**, 272 s, 87 turns | 6/6, **115 s**, **33 turns** |
+| read-before-edit | 0 | **2** | 0 |
+| edit misses | 0 | **3** | 0 |
+| chars of reasoning | 0 | 0 | 20.5k / 9.5k / 4.1k |
+
+**The control reproduced**, which is what makes the comparison legal: `balanced`
+came back 10/10, 6/6 in 199 s / 31 turns and 6/6 in 115 s / 33 turns, against
+206 s / 31 and 113 s / 33 measured a few hours earlier. Two independent
+same-session controls, agreeing to ~2%.
+
+## What the tier fixed
+
+**The two failures were quantization, both of them.**
+
+| task | IQ4_XS | Q6_K |
+|---|---|---|
+| `dup-block` (code-eval-hard) | **STALL**, 32 turns, 81 s | **PASS**, 4 turns, 18.1 s |
+| `dup-line` (code-eval-claude) | **FAIL**, hit the 40-turn limit | **PASS**, 13 turns, 36.7 s |
+
+Both were non-termination failures, and both cleared completely at one tier up.
+Total turns fell 67 -> 43 on the hard tier and 108 -> 87 on the client tier.
+That is exactly what step 8 describes: a marginal task consumes what the
+quantization left and tips into non-termination.
+
+**This corrects a reading made earlier the same day.** The IQ4_XS section above
+argued the failure signature pointed *away* from quantization, on the grounds
+that the tier lever has historically repaired marginal TOOL-DISCIPLINE failures
+and this model's discipline was already perfect. That inference was wrong. The
+lever is broader than the four-model table suggested: it also repairs marginal
+TERMINATION, which is the same thing that killed TD's multi-image item.
+
+## What the tier broke
+
+**Tool discipline, which was flawless at IQ4_XS.** Q6_K picked up **2
+read-before-edit violations and 3 edit misses** across `code-eval-claude`, on
+`numbered`, `dup-line` and `stale-edit`. IQ4_XS had zero of both, across both
+coding tiers.
+
+That is the KAT pattern - a higher tier moving behaviour in the wrong direction
+- and it matters for the general rule. The four-model table concluded "the one
+effect that has been consistent: a higher tier repairs marginal tool-discipline
+failures." **That now has a counterexample in the opposite direction**: here the
+higher tier CREATED tool-discipline failures while repairing termination.
+
+Both are still 6/6, so this did not cost a score. It costs the confidence of the
+generalisation.
+
+## What the tier did not touch
+
+`reason-eval-hard` stayed 9/10, failing `house-order` at both tiers, and landing
+on the same anti-pattern both times - "green". So that miss is the model. It
+still emits **zero chars of reasoning** at either tier, answering most items in
+1.0-1.4 s.
+
+And it still ends episodes by talking instead of calling `Submit`: 4 of 6
+`code-eval-claude` episodes stopped `no-tool-call` at IQ4_XS, 4 of 6 at Q6_K.
+The tier is not what drives that, which supports reading it as the
+tool-protocol mismatch the IQ4_XS section proposed rather than a capability
+gap.
+
+## Paired perplexity - the clean within-model comparison
+
+Taken before the IQ4_XS weights were deleted, because it is unrecoverable
+afterwards. Same model, same qwen2/151936 tokenizer, same corpus, 80 chunks at
+c 512.
+
+| tier | final estimate |
+|---|---|
+| IQ4_XS | 2.0231 +/- 0.03066 |
+| **Q6_K** | **2.0105 +/- 0.03045** |
+
+Per-chunk paired over chunks 20-80: **Q6_K lower at 61 of 61, zero flips.**
+Solid by the step-7 rubric, in its strongest available form. Gain on the final
+estimate 0.623%.
+
+**And it still did not predict anything.** 0.623% sits between `coder`'s 0.76%,
+which changed nothing at all, and KAT's 0.20%, which broke termination. Read
+against the capability result, the number is consistent - but it was equally
+consistent with two opposite outcomes on other models, so it forecast neither.
+Step 7 remains a tier check, never evidence of capability.
+
+## The quant-tier experiment, now across five models
+
+| model | PPL gain | capability effect | verdict |
+|---|---|---|---|
+| TD | 0.82% | **fixed** multi-image vision, 0/3 -> 3/3 | ship the higher tier |
+| KAT | 0.20% | **broke** termination, 0 -> 3 truncations | keep Q4 |
+| `coder` | 0.76% | **nothing** - same score, truncations, turns, vision | keep Q4 |
+| **QCN** | **0.623%** | **fixed termination** (2 tasks) **and broke tool discipline** (2 rbe, 3 edit misses) | irrelevant - loses at both tiers |
+
+Five experiments, five different answers, and this one is the first to move
+capability in **both directions at once**. The standing conclusion holds and
+gets stronger: **measure the tier, do not infer it** - not from perplexity, not
+from another model, not from the same model's other tiers, and not, as this
+session shows, from the shape of the failure either.
+
+## A free result: the byte model hits Q6_K to 2%, having missed IQ4_XS by 21%
+
+Not what this tier was fetched for, and possibly the most useful thing it
+produced. The 2026-08-16 entry recorded the byte model's worst miss ever on this
+box - IQ4_XS predicted 28.1 t/s and measured 22.06/22.29, **21% under** - and
+proposed that IQ4_XS is slow per byte specifically on ROUTED EXPERTS through
+Vulkan's `MUL_MAT_ID`, rather than the byte model being broken.
+
+Q6_K is the same model, the same expert tensors, the same code path, at a
+different quant type:
+
+| tier | GiB | MiB/token | byte model | measured | miss |
+|---|---|---|---|---|---|
+| IQ4_XS | 39.91 | 2054 | 28.1 | 22.29 | **-21%** |
+| **Q6_K** | 61.27 | 3153 | 18.3 | **17.94** | **-2%** |
+
+**The byte model is fine. IQ4_XS is the anomaly.** A model that was 21% optimistic
+on one quant type and 2% accurate on another, on the same weights and the same
+kernel path, is not a broken model - it is a broken assumption about one type.
+
+This is strong evidence for the expert-dequant hypothesis and it was obtained for
+free. It does NOT retire the proposed Q4_K_M test, which remains the clean
+version of the experiment - Q4_K_M is a K-quant at roughly IQ4_XS's size, so it
+separates "IQ4-family dequant is slow on experts" from "anything below ~5 bpw is
+slow on experts". But it does mean the heuristic that needs narrowing is
+"IQ4_XS is smaller AND faster", not the bytes-per-token model itself.
+
+## Verdict: still reject, at both tiers
+
+Q6_K reaches 6/6 on both coding tiers - the score `balanced` already has - and
+pays for it with:
+
+- **42% less generation** (17.94 against 30.87) and **44% less prefill** (163.5
+  against 293.2);
+- **34% less two-stream aggregate** (10.00 against 15.24);
+- **2.6x the turns** on the tier that matches the real client (87 against 33),
+  at 2.4x the wall clock (272 s against 115 s);
+- **2.5x the pool** (66.9 GiB against 27.2), leaving ~9 GiB of headroom;
+- and it still loses hard reasoning, 9/10 against 10/10.
+
+The tier question is closed. The model question was already closed. What was
+genuinely worth the 61 GiB is the method result: the failure signature does not
+tell you whether a tier is responsible, and only measuring does.
+
+## Cleanup
+
+Deleted by user decision after the measurements completed, **40.53 GiB
+reclaimed**:
+
+| file | size |
+|---|---|
+| `EVAL-Qwen3-Coder-Next-IQ4_XS.gguf` | 39.91 GiB |
+| `EVAL-QCN-DFlash-q8_0.gguf` | 486 MiB |
+| `EVAL-QCN-Eagle3-Q8_0.gguf` | 153 MiB |
+
+Both drafter stanzas removed from `router.ini` with them, tombstoned in place
+rather than dropped - a future session will be tempted to re-download a drafter
+for this model, and the wedge, not the throughput, is the reason not to.
+
+`qcn-eval` remains as an eval slot on the Q6_K weights, `load-on-startup =
+false`, not in `opencode.json`.
+
+## What was verified vs. inferred
+
+**Measured this session**: every number above, through the production router on
+8080 except the two perplexity runs, which ran standalone with the router
+stopped. `balanced` re-measured as the control in the same session.
+
+**Verified**: both Q6_K parts' SHA256 against the HF API; the 66.92 GiB resident
+figure from the GPU's own `mem_info_gtt_used` and `mem_info_vram_used`; that the
+split file loads and serves at ctx 262144 through the router.
+
+**Inferred, not verified**: that the `cache-ram` difference (4096 against
+`balanced`'s 24576) did not affect any tier result - it is argued from the
+request shapes, not tested. That the `no-tool-call` episode endings are a
+tool-protocol mismatch; that remains untested at either tier.
+
+**Not attempted**: the Q4_K_M tier, vision (no mmproj published), soak, depth.
+
+**One caution on the byte-model section above**: the 3153 MiB/token figure for
+Q6_K is scaled from IQ4_XS's back-solved 2054 by the file-size ratio, not
+derived from a per-tensor accounting of this file. That is the same method the
+2026-08-16 entry used, so the comparison between the two rows is internally
+consistent, but both rows inherit whatever error is in the original back-solve.
