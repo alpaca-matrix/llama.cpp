@@ -299,8 +299,18 @@ and read cumulative depth, not `prompt_n` (which is the delta).
 Facts established 2026-08-14, to 234k tokens on two models:
 
 - **GTT does not grow with depth.** KV is preallocated at `ctx-size` on load, so
-  the load-time footprint is the worst case and a long conversation cannot creep
-  the pool.
+  a long conversation cannot creep the pool.
+- **But the load-time footprint is NOT the worst case** - the FIRST REQUEST is.
+  Measured 2026-08-17 on `balanced`, twice: 26.88 GiB (GTT 10.96 + VRAM 15.92)
+  after `model loaded`, and **36.0 GiB (GTT 20.05 + VRAM 15.94) after a single
+  short completion**, a 9.1 GiB step that then stays. Depth is flat after that.
+  The mechanism was not isolated (compute/graph buffers at `ubatch 2048` x
+  `parallel 3`, or the MTP draft context allocating lazily, or both).
+  Consequences: the 27.2 GiB long recorded for `balanced` is its **pre-request**
+  figure, budget 36 against the 76 GiB pool instead; measure resident AFTER a
+  request; and never compare one alias's under-load number against another's
+  pre-request number, which is the same class of mistake as comparing a new
+  tier's standalone numbers against the incumbent's router numbers.
 - **tg at depth tracks draft acceptance, which is content-dependent, not
   depth-dependent.** It wandered 0.72-0.95 with no trend. Single-point tg
   comparisons at depth are noise; compare the whole curve or retention.
@@ -421,7 +431,10 @@ Distinguish the signatures:
   which left a sweep cell running with no parent.
 - **After any run**: no stray spare-port servers, no D-state processes, GTT back
   to the production baseline, repo and `/etc/llama` identical, production alias
-  resident.
+  resident. When checking GTT against the baseline, note WHICH baseline: a
+  resident alias that has served a request sits ~9 GiB above its own load-time
+  figure (see step 6), so "9 GiB high" after a swap is normal and is not a leak.
+  Reading it as one cost a service restart on 2026-08-17 to disprove.
 - Do not run two GPU workloads at once. A stray recursive `grep` over the model
   directory cost 11% on one measurement.
 

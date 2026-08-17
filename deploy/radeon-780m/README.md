@@ -1127,16 +1127,28 @@ the cut in the first place. Re-downloadable; promoting it would need the full
 playbook against today's `balanced` in the same session, plus the soak it has
 never had.
 
-**Three eval slots added 2026-08-17, at step 0 only.** Nothing below has been
-swept, measured or scored - these are `load-on-startup = false` stanzas plus a
-paper verdict, and the numbers are byte-model predictions. Full reasoning is in
-each stanza in `router.ini` and in `candidates.md`.
+**Three eval slots added 2026-08-17, at step 0 plus a load smoke test.** None has
+been swept or scored - `load-on-startup = false`, no step 3, no eval tier, no
+perplexity. All three load and answer correctly, so the SHA256-verified weights
+are intact; every t/s figure below is still a byte-model prediction. Full
+reasoning is in each stanza in `router.ini` and in `candidates.md`.
 
-| Slot | Model | Step 0 verdict |
-|---|---|---|
-| `gemma4-eval` | google/gemma-4-26B-A4B-it Q4_K_M + mmproj + its own MTP drafter, 17.4 GiB | **PASS.** 128 experts top-8, vision, apache-2.0, 262144 native ctx, 5:1 windowed attention. Predicted 11.1-18.5 t/s unspeculated - slower than `balanced`, at ~21-22 GiB resident, which would be lighter |
-| `mythos-eval` | squ11z1/Mythos-nano Q6_K, 2.36 GiB | **FAIL - dense.** 3.1B, no MTP head, no mmproj. Predicted 12.4-20.7 t/s, i.e. no faster than a 35B MoE. Wired up by request to confirm the paper call |
-| `gemma4-12b-eval` | yuxinlu1 agentic fine-tune of gemma-4-12B-it Q6_K + grafted MTP, 9.5 GiB | **FAIL - dense.** 12B, predicted 3.2-5.4 t/s against `balanced`'s measured 30.87. The dense FFN alone is 6.97 of its 9.77 GB per token. Wired up by request |
+| Slot | Model | Step 0 verdict | Measured at load |
+|---|---|---|---|
+| `gemma4-eval` | google/gemma-4-26B-A4B-it Q4_K_M + mmproj + its own MTP drafter, 17.4 GiB | **PASS.** 128 experts top-8, vision, apache-2.0, 262144 native ctx, 5:1 windowed attention. Predicted 11.1-18.5 t/s unspeculated | 25.59 GiB resident, **10.4 GiB lighter than `balanced`**; draft acceptance 0.872 on one boilerplate prompt |
+| `mythos-eval` | squ11z1/Mythos-nano Q6_K, 2.36 GiB | **FAIL - dense.** 3.1B, no MTP head, no mmproj. Predicted 12.4-20.7 t/s, i.e. no faster than a 35B MoE | 6.15 GiB, the lightest ever served here. **Thinks in `content`** - `<think>` is not extracted, so any scorer reads reasoning as the answer |
+| `gemma4-12b-eval` | yuxinlu1 agentic fine-tune of gemma-4-12B-it Q6_K + grafted MTP, 9.5 GiB | **FAIL - dense.** 12B, predicted 3.2-5.4 t/s against `balanced`'s measured 30.87. The dense FFN alone is 6.97 of its 9.77 GB per token | 17.53 GiB; draft acceptance **0.632** against the 26B's 0.872 minutes apart - the graft penalty, reproduced |
+
+**Resident footprint is measured AFTER a request, not after `model loaded`.** The
+two differ by ~9 GiB and the distinction was not being drawn here before
+2026-08-17. `balanced` measures 26.88 GiB (GTT 10.96 + VRAM 15.92) once loaded
+and **36.0 GiB (GTT 20.05 + VRAM 15.94) after a single short completion**,
+reproduced twice, and flat with depth thereafter. So the 27.2 GiB recorded for
+`balanced` throughout this repo is its pre-request figure - budget 36 against the
+76 GiB pool. The mechanism was not isolated (compute/graph buffers at ubatch 2048
+x parallel 3, lazy MTP draft-context allocation, or both). This also means a
+9 GiB rise after swapping aliases is normal and not a leak; reading it as one
+cost a restart to disprove.
 
 The one architectural fact worth carrying out of that vetting: gemma4's MTP
 drafter is a **separate** model (arch `gemma4-assistant`, wired with

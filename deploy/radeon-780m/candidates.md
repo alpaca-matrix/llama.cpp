@@ -4564,6 +4564,105 @@ Two provenance flags, neither disqualifying: the GGUF carries no
 Merged Fp16"), and it sets `tokenizer.ggml.suppress_tokens [258883, 258882]`,
 which nothing else here does.
 
+## Deployed and load-smoke-tested, same session
+
+All three stanzas went in through the normal path (commit, push, `git pull
+--ff-only`, `cp` into `/etc/llama`, restart while idle, wait for `model loaded` +
+`listening`), and each alias was then given ONE short completion through the
+router. That is a load test, not step 3 - there is no sweep, no tier, no
+perplexity and no throughput figure for any of them.
+
+| | `gemma4-eval` | `mythos-eval` | `gemma4-12b-eval` | `balanced` (control) |
+|---|---|---|---|---|
+| loads | text + spec + mmproj | text | text + spec | resident |
+| answers correctly | yes | yes | yes | yes |
+| resident, under load | **25.59 GiB** | **6.15 GiB** | 17.53 GiB | **36.0 GiB** |
+| reasoning extracted | yes, 453 chars | **NO - inline in content** | yes, 138 chars | yes |
+| draft acceptance | **0.872** (82/94), len 2.74 | n/a (none) | **0.632** (24/38), len 2.26 | not re-measured |
+| cache-reuse | disabled (mmproj) | active | disabled (shared-KV ctx) | disabled (mmproj) |
+
+Four things came out of a test that was only supposed to prove the files load.
+
+### The gemma4 shared-KV drafter works, and the log proves it
+
+`llama_kv_cache: layer 0: sharing with layer 28` / `layer 3: sharing with layer
+29` for the drafter's four blocks against the 26B target's last two layers -
+exactly the `n_layer-1` / `n_layer-2` mapping the share lambda computes in
+`src/llama-model.cpp`. The mode is not merely selected, it is allocating shared.
+
+Acceptance 0.872 at n-max 2 on a one-line prompt, against `fast`'s 0.782 with its
+own co-trained head. Encouraging and not a workload number - QCN's DFlash
+measured 0.984 on one boilerplate prompt and 0.805 on real source the next day,
+which is exactly why step 3 requires `PROMPT_FILE`.
+
+### The graft penalty reproduced on a second architecture
+
+The 12B runs the BASE `gemma-4-12B-it` MTP head against a fine-tuned target and
+accepted **0.632**, where the 26B's co-trained head accepted **0.872** on the
+same prompt minutes apart in the same session. KAT showed this once (0.76 grafted
+against 0.85-0.87 co-trained); this is the cleanest instance of it here, because
+both halves were measured under identical conditions rather than across sessions.
+
+### Resident footprint is a pre-request and an under-load number, and this repo had been quoting the wrong one
+
+Chasing what looked like 9 GiB of leaked GTT after the three swaps produced a
+better result than the leak hypothesis it started as. There was no leak:
+
+| `balanced` | GTT | VRAM | total |
+|---|---|---|---|
+| after `model loaded`, no request yet | 10.96 | 15.92 | **26.88 GiB** |
+| after ONE short completion | 20.05 | 15.94 | **36.0 GiB** |
+
+Reproduced twice, including once from a clean restart, and flat with depth after
+that. So the **27.2 GiB** figure recorded for `balanced` across this repo is its
+pre-request footprint, and its real ceiling against the 76 GiB pool is 36. Step 6
+of the playbook said "the load-time footprint is the worst case"; that is now
+corrected - depth cannot creep the pool, but the first request adds ~9 GiB.
+
+The mechanism was not isolated. Candidates are compute and graph buffers at
+`ubatch 2048` x `parallel 3`, and lazy allocation in the MTP draft context. Note
+`mythos-eval` - no speculation, no mmproj, ctx 131072 - carries only 3.8 GiB of
+total overhead above its weights, so whatever it is scales with something this
+box's production settings push hard.
+
+Two consequences beyond the numbers. The comparison in the `gemma4-eval` stanza
+had to be redone: its 25.59 GiB is an under-load figure, so it belongs next to
+`balanced`'s 36.0 and not next to 27.2, which makes it **10.4 GiB lighter than
+the default** rather than the 1.6 GiB the wrong pairing suggested. And "GTT back
+to the production baseline" in the cleanup checklist now needs to say which
+baseline, because a 9 GiB rise after a swap is correct behaviour.
+
+### Two benign log lines, and one real defect
+
+Benign, recorded so nobody re-investigates them:
+
+- `E llama_init_from_model: failed to initialize the context: Gemma4Assistant
+  requires ctx_other to be set` plus `W [spec] failed to measure draft model
+  memory`. The source labels this normal during memory fitting - the fitting pass
+  builds a context without `ctx_other`, which this arch refuses by design. The
+  real consequence is that **the router's memory fit does not count the gemma4
+  drafter at all**. It is 0.43 GiB here so it does not matter; it would matter for
+  a larger one.
+- Both gemma4 aliases lose the global `cache-reuse = 256`, by two different
+  routes: `not supported by multimodal` on the 26B (its mmproj), and `not
+  supported by this context` on the 12B (its shared-KV draft context).
+
+The real defect is `mythos-eval`: **it thinks in the content field.** It emits
+`<think>` and llama.cpp does not extract it, because its template never renders a
+thinking channel for the autoparser to infer delimiters from, so
+`reasoning_content` came back empty and 351 tokens of raw reasoning landed in
+`message.content` on a one-line prompt. `reasoning-format` cannot fix that - the
+format detection is what is missing, not the extraction setting. Any eval tier run
+against this alias would be scoring reasoning as the answer.
+
+### State after the run
+
+Production alias `balanced` resident and answering, no D-state processes, no
+stray spare-port servers, repo and `/etc/llama/router.ini` identical, `journalctl
+-k` clean of `ring comp_X timeout` and `device wedged` for the whole session.
+Disk 31% used, 327 GB free after 29.6 GiB of new weights. Seven files fetched via
+`fetch-model.sh`, all SHA256-VERIFIED.
+
 ## What was verified vs. inferred
 
 **Verified from GGUF headers on the box**, never from a model card: every arch,
@@ -4580,12 +4679,30 @@ rather than the compatibility-workaround path, and that the 12B drafter's
 is selected by `ctx_other == ctx_tgt`; that `n_max` is clamped only under
 `chain_heads`; that `spec-draft-model` is the router key for a separate drafter.
 
-**Predicted, not measured**: every t/s figure, and the ~3 GiB KV and 21-22 GiB
-resident estimates for `gemma4-eval`. The realised band 0.45-0.75 is the
-playbook's, and the last candidate showed it can be wrong by 21% on an IQ-family
-tier.
+**Measured on the box, one session, through the production router**: that all
+three aliases load and answer correctly; every resident figure in the smoke-test
+table; both draft-acceptance figures; the `balanced` pre-request vs under-load
+step, taken twice including once from a clean restart; that the gemma4 drafter
+allocates shared KV against the target's last two layers; that `mythos-eval`
+returns its reasoning inside `message.content`.
 
-**Not attempted**: any sweep, eval tier, perplexity run or load test. The three
-stanzas have never been loaded. `gemma4-eval` still owes step 3 before any tier
-result means anything, and the two dense candidates owe the positive
-no-MTP-head confirmation.
+**Predicted, not measured**: every t/s figure. The resident prediction for
+`gemma4-eval` was 21-22 GiB and it measured 25.59, so the ~3 GiB KV estimate
+behind it was low - that estimate is superseded, the measurement stands. The
+realised band 0.45-0.75 is the playbook's, and the last candidate showed it can
+be wrong by 21% on an IQ-family tier.
+
+**Not isolated**: what the 9.1 GiB first-request step actually is. Compute and
+graph buffers at `ubatch 2048` x `parallel 3` and lazy MTP draft-context
+allocation are both consistent with it; nothing here separates them, and the log
+verbosity in the unit does not print per-buffer sizes.
+
+**Read with the playbook's own warning**: both acceptance figures come from ONE
+short boilerplate prompt. That is how DFlash got credited with 0.984 on QCN and
+delivered 0.805 on real source. The 0.872-against-0.632 comparison is sound
+because both halves share the prompt and the session; neither absolute value is.
+
+**Not attempted**: any sweep, eval tier, perplexity run, depth run or soak.
+`gemma4-eval` still owes step 3 before any tier result means anything, and the
+two dense candidates owe the positive no-MTP-head confirmation - though the 12B's
+drafter loading and accepting 0.632 already settles that it HAS one.
