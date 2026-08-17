@@ -166,6 +166,17 @@ winning `n_max`.
 - **MoE draft lengths stay short.** Each verified token routes to its own
   experts, so verify cost grows with draft length. Every alias here peaks at
   n-max 2.
+- **A sweep cell that never returns is a result, not a broken run.** An
+  EXTERNAL drafter can hard-wedge a slot: generation freezes mid-request,
+  `/slots` still reports `is_processing` with `n_decoded` frozen, the GPU sits
+  at 90% emitting nothing until the client's 900 s timeout. It is not the
+  amdgpu watchdog - check `journalctl -k` and it is clean - and it clears when
+  the client gives up. Qwen3-Coder-Next did this in 7 of 21 speculated cells on
+  2026-08-17, with both DFlash and Eagle3, and it reproduced on ordinary router
+  traffic with EOS enabled, so it is not the harness's `ignore_eos`. Give each
+  cell its own `LOG` path or the post-mortem is overwritten by the next one,
+  and count the hangs - a config that wedges is disqualified whatever it
+  measures.
 
 **Column limit.** The Vulkan matvec path applies only up to
 `GGML_VK_MUL_MAT_VEC_ID_MAX_COLS` (12 in the unit) columns, and the batch is
@@ -360,6 +371,10 @@ Distinguish the signatures:
   contain the pattern - it matches itself and waits forever. Cost 20 minutes on
   2026-08-15, and a stale process from an earlier session was found spinning on
   the identical bug. Wait on a marker file or a completion line in a log.
+  `pkill -f` over SSH is the same bug with teeth: the remote `bash -c` line
+  contains the pattern, so it kills the session instead of the target and
+  orphans whatever the target had spawned. Kill by PID. Found again 2026-08-17,
+  which left a sweep cell running with no parent.
 - **After any run**: no stray spare-port servers, no D-state processes, GTT back
   to the production baseline, repo and `/etc/llama` identical, production alias
   resident.

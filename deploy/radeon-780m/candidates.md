@@ -3803,3 +3803,226 @@ a probe value inherited from July - every alias here that speculates peaked at
 2, and three vendors have now shipped a wrong n-max for this hardware. No eval
 tier has been run, so there is no capability claim of any kind about this model
 at this tier yet, and no same-session control against `fast` or `balanced`.
+
+---
+
+# Qwen3-Coder-Next at IQ4_XS: swept, evaluated, rejected - 2026-08-17
+
+The full playbook against `qcn-eval`, steps 3 through 5, in one session. Step 3
+answered the drafter question the 2026-08-16 probes left open and then answered a
+larger one nobody asked: **speculation on this model wedges slots.** Step 5 then
+lost both coding tiers to `balanced`.
+
+Verdict: **reject.** Not for the reason it was fetched to test - it is a
+competent reasoner - but because it is slower than the incumbent on every
+throughput axis and needs three times the turns to do the same agentic work.
+
+## Step 3 - the sweep, and DFlash beats Eagle3 without winning anything
+
+`spec-sweep.sh` on port 8081, `PROMPT_FILE=/root/llama.cpp/src/llama-context.cpp`,
+`PARALLEL=3`, `GGML_VK_MUL_MAT_VEC_ID_MAX_COLS=12`, `NPREDICT=300`, ctx 32768.
+Aggregate is the honest metric; per-stream tg is shown because it is what
+flatters speculation.
+
+**One stream:**
+
+| config | tg | pp | acceptance | aggregate | vs none |
+|---|---|---|---|---|---|
+| none | 22.39 | 222.8 | - | 12.54 | - |
+| dflash n1 | 21.46 | 236.6 | 1.000 (596/596) | 12.51 | -0.2% |
+| dflash n2 | **HANG** 959 s | | | | |
+| dflash n3 | 24.37 | 230.1 | 0.805 (844/1049) | 13.17 | +5.0% |
+| dflash n4 | **HANG** 935 s | | | | |
+| dflash n3 p0.3 | **HANG** 932 s | | | | |
+| dflash n3 p0.5 | **HANG** 958 s | | | | |
+| **dflash n3 p0.75** | **26.68** | 218.0 | **0.987** (667/676) | **13.48** | **+5.7%** |
+| eagle3 n1 | 18.20 | 231.6 | 1.000 (596/596) | 11.27 | -10.1% |
+| eagle3 n2 | **HANG** 999 s | | | | |
+| eagle3 n3 | 16.29 | 212.7 | 0.574 (755/1316) | 10.01 | -20.2% |
+| eagle3 n4 | **HANG** 947 s | | | | |
+
+**Two streams - the concurrency this box is tuned for:**
+
+| config | per-stream tg | pp | acceptance | aggregate | vs none |
+|---|---|---|---|---|---|
+| **none** | 14.06 | 113.5 | - | **14.18** | - |
+| dflash n1 | 12.36 | 110.0 | 1.000 (596/596) | 12.70 | -10.4% |
+| dflash n2 | 11.90 | 110.3 | 0.889 (764/859) | 12.74 | -10.2% |
+| dflash n2 p0.3 | 11.43 | 108.9 | 0.913 (738/808) | 12.28 | -13.4% |
+| dflash n2 p0.5 | 12.62 | 107.3 | 0.975 (655/672) | 12.73 | -10.2% |
+| dflash n3 | 12.05 | 112.1 | 0.765 (831/1086) | 12.14 | -14.4% |
+| dflash n4 | **HANG** 966 s | | | | |
+| eagle3 n1 | 9.74 | 110.6 | 1.000 (596/596) | 11.22 | -20.9% |
+| eagle3 n2 | 7.84 | 103.3 | 0.669 (683/1021) | 9.30 | -34.4% |
+| eagle3 n3 | 7.14 | 106.6 | 0.483 (706/1461) | 9.05 | -36.2% |
+
+Eagle3 n4 at two streams was not run: the head had already lost by 20-36% at
+every completed setting and the cell was odds-on to spend 15 minutes hanging.
+
+**Noise floor, three cells repeated:**
+
+| cell | run 1 | run 2 | delta |
+|---|---|---|---|
+| conc2 none, aggregate | 14.18 | 14.04 | -1.0% |
+| conc1 dflash n3, aggregate | 13.17 | 13.18 | +0.1% |
+| conc1 none, aggregate | 12.54 | 12.95 | +3.3% |
+
+1-3%, matching the recorded floor. Note that `conc1 dflash n3` came back
+**bit-identical on acceptance** - 844/1049 twice, tg 24.37 against 24.38 - while
+the unspeculated baseline moved 3.3% on prefill. So the +5.0% read off run 1 is
+really about +3.4% against the two-run baseline mean, and only p-min 0.75 puts
+DFlash clearly outside the floor at one stream.
+
+**The drafter question is settled: DFlash, by a wide margin, and it does not
+matter.** At the same n-max 3 it accepts 0.805 against Eagle3's 0.574, and the
+gap widens with draft length (0.987 against 0.483 at the extremes). Eagle3 is a
+net loss at every single setting measured, at both concurrencies - it never once
+beat not speculating. That is consistent with the 2026-08-16 size argument: a
+145M head against a 0.5B block-diffusion drafter.
+
+But DFlash's own case does not survive the two-stream column. Its best
+configuration there is 12.74 against 14.11 unspeculated (mean of the two
+baseline runs), and **p-min cannot rescue it** - pushing acceptance to 0.975
+still lands at 12.73, because p-min buys acceptance by declining to draft, which
+converges on the unspeculated case minus the drafter's overhead. Against +5.7%
+at one stream, the trade is the mirror image of `fast`'s and it points the other
+way. **Ship nothing**, which is how `qcn-eval` was already configured.
+
+## Speculation wedges slots on this model, and it is not the harness
+
+Seven of the 21 speculated cells hung. Every one has the same signature:
+
+- the first prompt of the cell always completes normally, at full speed and good
+  acceptance - the hung `n3 p0.3` cell did 300 tokens at 29.68 t/s, acceptance
+  0.923, mean draft len 3.71, before it died;
+- the **second** prompt wedges mid-generation, at `n_decoded` between 149 and
+  232 of 300;
+- the GPU sits at 90% busy with no token emitted for the full 15 minutes to the
+  client timeout, and `/slots` shows `is_processing: true` with `n_decoded`
+  frozen - polled three times over 90 s, it does not advance by one;
+- `journalctl -k` is **clean** - no `ring comp_X timeout`, no `device wedged`, no
+  fence-fallback line, across the whole session. This is not the amdgpu
+  compute-ring watchdog that 2026-08-05 diagnosed;
+- it always recovers once the client gives up. The server reaps, GTT returns, no
+  D-state process, no power cycle.
+
+It happens on both drafters, at n-max 2, 3 and 4, at both concurrencies, and at
+p-min 0, 0.3 and 0.5. It never happened in the nine unspeculated cells.
+
+**It is not an artifact of `ignore_eos`.** The obvious objection is that
+`spec-sweep.sh` forces 300 tokens with `ignore_eos: true`, which can drive
+degenerate repetition the drafter then rides. So the same five prompts were sent
+through the **production router** as ordinary chat requests - EOS allowed,
+`max_tokens 600`, no forced length - once against `qcn-dflash-eval` at its n-max
+4, once against `qcn-eval`:
+
+| request | `qcn-dflash-eval` | `qcn-eval` (no spec) |
+|---|---|---|
+| 1 - explain 9 KB of source | 600 tok, 76.8 s | 600 tok, 50.7 s |
+| 2 - rolling-median class | 600 tok, 24.8 s | 600 tok, 27.3 s |
+| 3 - review 8 KB of source | 600 tok, 47.7 s | 600 tok, 34.9 s |
+| 4 - Rust semver parser | **WEDGE, 300 s timeout** | 600 tok, 27.1 s |
+| 5 - summarise control flow | 208 tok, 44.5 s | 236 tok, 21.2 s |
+
+Request 4 carries no source file at all - it is a plain "write a Rust semver
+range parser" prompt - and it wedged with the drafter on and finished in 27 s
+with it off. **The wedge follows speculation into ordinary traffic.**
+
+What this does NOT establish: whether the bug is in `common/speculative.cpp`, in
+the `dflash`/`eagle3` implementations, or in the Vulkan `MUL_MAT_ID` path they
+drive; and whether it reaches other models. `fast` and `balanced` both speculate
+via MTP and neither has ever shown this. The distinguishing feature of these two
+is an **external drafter model**, which nothing else here currently runs. That is
+the hypothesis to test if the question is ever worth reopening; the alias itself
+does not need it answered, because the throughput case for speculation here was
+already zero.
+
+## Steps 4 and 5 - through the router, same session, against `balanced`
+
+Sweep first, then tiers - step 3 gates step 5, and the sweep said no
+speculation, so `qcn-eval` was measured as configured. `balanced` re-measured in
+the same session as the control.
+
+| | **`qcn-eval`** (QCN IQ4_XS) | **`balanced`** (TD Q6_K) |
+|---|---|---|
+| resident | 45.6 GiB | 27.2 GiB |
+| speculation | none (swept, rejected) | MTP n-max 2 |
+| pp, 1 stream | 243.2 (241.8-243.4) | **273.3** (270.6-273.8) |
+| tg, 1 stream | 22.29 (22.29-22.32) | **30.75** (30.75-30.78) |
+| per-stream tg, 2 streams | 14.09 | **17.75** |
+| aggregate, 2 streams | 13.49 | **15.24** |
+| draft acceptance, 2 streams | n/a | 0.861 |
+| **reason-eval-hard** | 9/10, 0 trunc, **41 s**, **0c** | **10/10**, 0 trunc, 206 s, 20.5k |
+| **code-eval-hard** | 5/6, 238 s, **67 turns** | **6/6**, 195 s, **31 turns** |
+| **code-eval-claude** | 5/6, 240 s, **108 turns** | **6/6**, **113 s**, **33 turns** |
+| tool discipline | 0 rbe, 0 line-num, 0 edit miss, 0 botch | same, all zero |
+
+`qcn-eval`'s 1-stream numbers reproduce 2026-08-16 closely (231.1/22.06 then,
+243.2/22.29 now), so the box has not drifted and the comparison is clean.
+
+**The reasoning tier is where it looks good, and the reason is that it does not
+think.** 9 of 10 correct with **zero chars of reasoning**, most items answered in
+1.0-1.2 s, the whole tier in 41 s against `balanced`'s 206. Its single miss,
+`house-order`, is the one item where it did spend time - 30.3 s - and it landed
+on the anti-pattern. That is a real and useful property: on this box, hard
+reasoning has always cost 200-990 s of thinking, and this is the first model to
+get 9/10 without a thinking channel at all. If the workload were single-shot
+questions, that would be an argument.
+
+**The coding tiers are where it loses, and they are the tiers that matter.**
+`code-eval-hard` saturates - six previous models all scored 6/6 - and this is
+the second candidate ever to break that, by **stalling out on `dup-block` after
+32 turns and 81 s**. On `code-eval-claude`, the tier that matches the real
+client, it needs **108 turns against `balanced`'s 33**, and `dup-line` failed by
+exhausting the 40-turn limit. It is not blundering: read-before-edit, line-number
+discipline, edit misses and botched calls are all zero, better than KAT ever
+managed. It grinds - many tiny turns, several ending in `no-tool-call` stalls
+that burn a turn producing nothing.
+
+Session latency is turns x per-turn time, and this candidate is worse on both
+factors at once: 3.3x the turns at 0.72x the generation speed.
+
+## Where this leaves the model, and the open questions it does not close
+
+**Reject `qcn-eval`.** Rejected on measurement, at this tier, against today's
+lineup, in one session with the control re-measured - which is a stronger
+rejection than the 2026-08-03 one it inherited.
+
+Kept, because deleting them is the user's call and the two drafters together are
+639 MiB: the three stanzas and all three files. The `qcn-dflash-eval` and
+`qcn-eagle3-eval` stanzas are marked DO NOT SHIP in `router.ini` - they wedge
+slots, and a stanza that looks tuned is exactly how a future session ships one.
+
+Still open, and none of it is blocked on this rejection:
+
+- **The Q4_K_M tier question from 2026-08-16 is untouched.** The byte model
+  predicted 28.1 t/s and this file measures 22.3, and the proposed test - Q4_K_M
+  of the same model, which the byte model says should be 11% slower - would
+  settle whether IQ4_XS on routed experts is the cause. That is a claim about
+  **this box's quant heuristic**, not about this model, so it survives the
+  rejection intact and is still worth a fetch.
+- **Whether the wedge reaches other external-drafter setups**, per above.
+- Perplexity was not run. It could not have decided anything - the tokenizer is
+  qwen2/151936 against the incumbents' qwen35/248320, so no cross-model pairing
+  exists, and step 7 never promotes anything anyway.
+- No vision tier: no mmproj is published for this model.
+- No soak: soaks are for candidates taking a production alias.
+
+## What was verified vs. inferred
+
+**Measured this session**: every number in every table above, all through
+`spec-sweep.sh` on 8081 or the production router on 8080, on one build with one
+`router.ini`, with the incumbent re-measured as the control and three sweep cells
+repeated for the noise floor.
+
+**Verified by observation**: the wedge signature - frozen `n_decoded` polled
+three times over 90 s, GPU at 90%, clean `journalctl -k` for the whole session,
+clean recovery on client timeout. And that it reproduces on ordinary router
+traffic with EOS enabled.
+
+**Inferred, not verified**: that the external drafter is what distinguishes the
+wedging configurations from `fast` and `balanced`'s MTP - that is a hypothesis
+from what the two hanging setups have in common, not a code read or a bisect. No
+attempt was made to locate the bug in the source.
+
+**Not attempted**: Eagle3 n4 at two streams, perplexity, vision, soak, depth.
