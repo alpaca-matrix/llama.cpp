@@ -12,15 +12,25 @@ are reproducible with `bench.sh`.
 |---|---|
 | CPU | Ryzen 7 8745H, 8C/16T, AVX-512 + VNNI + BF16 |
 | iGPU | Radeon 780M, 12 CU RDNA3, `fp16` + `KHR_coopmat`, no FP4 |
-| RAM | 2x48 GB DDR5-5600 dual channel |
-| Measured read bandwidth | 59.4 GB/s (peak at 8 threads; 16 threads is slower) |
+| RAM | 2x48 GB DDR5-5600 dual channel, dual-rank, both channels populated |
+| Theoretical peak | 89.6 GB/s (5600 MT/s x 16 B) |
+| Achievable by the GPU | 76-81 GB/s measured, 85-90% of peak |
+| What decode actually extracts | 75.0 GB/s at Q4_K on routed experts, 96% of achievable |
+| CPU-side read | 59.4 GB/s (peak at 8 threads) - NOT the ceiling, see below |
 | GPU-addressable | 16 GiB VRAM carveout + 60 GiB GTT = 76 GiB |
 
-Token generation is bandwidth-bound on this platform. The 59.4 GB/s figure sets
-the ceiling: generation speed is roughly bandwidth / bytes-read-per-token, so
-MoE models with few active parameters massively outperform dense models of the
-same file size. A dense 27B runs at ~4 t/s; a 35B MoE with 3B active runs at
-~22 t/s from the same 16-20 GiB on disk.
+Token generation is bandwidth-bound on this platform: generation speed is
+roughly bandwidth / bytes-read-per-token, so MoE models with few active
+parameters massively outperform dense models of the same file size. A dense 27B
+runs at ~4 t/s; a 35B MoE with 3B active runs at ~22 t/s from the same 16-20 GiB
+on disk.
+
+**Use ~74 GB/s for the byte model, never 59.4.** The 59.4 figure is a CPU-side
+read and this table cited it as "the ceiling" for months, which understated the
+GPU by a quarter. The ~74 GB/s constant the byte model actually uses was until
+2026-08-17 a back-solve from inference results, which made it mildly circular to
+then judge inference with it. It is now measured directly and independently, and
+it holds - see "The memory ceiling, measured directly" below.
 
 ## What actually mattered
 
@@ -68,6 +78,84 @@ Do not spend time on these; all measured zero or negative on this hardware.
 | Vulkan: FA scalar path for the 2-4-row verify batches | flat at 2.6k ctx (35.09 vs 35.07 served); untested at depth |
 | Vulkan: LOWER the `mul_mat_id` vector-path threshold to 1 | tg -27% (25.79 vs 35.07 served) - expert-count prepass + matrix tiles swamp the union-read saving at tiny n; with the earlier raise-to-32 rejection this brackets the default 8 as correct on this box |
 | ~~Gated (Laguna) DFlash speculation on `laguna-eval`~~ | **REVERSED 2026-08-07** - the drafter was being run at its shipped BF16, which costs ~35 ms of a ~156 ms round on this bandwidth-bound box and ate the whole margin. Quantized to Q4_K_M it is +19.4%, not +0.9%. See "A BF16 drafter cannot pay for itself" below |
+| Faster RAM to lift the bandwidth ceiling | dead end twice over - 48 GB SODIMMs do not exist above DDR5-5600 (the 6400 96 GB kits are desktop U-DIMM), and dropping to 2x32 for speed would cut the pool below what `deep` needs. Both DIMMs already train at the rated 5600. See "The memory ceiling, measured directly" |
+| Hunting kernel overhead on the decode path | only ~3.7% exists - Q4_K matvec on experts reaches 75.0 GB/s against f16's 77.8 with no dequant at all. Spend effort on bytes per token instead |
+
+### The memory ceiling, measured directly (2026-08-17)
+
+The ~74 GB/s the byte model runs on had never been measured. It was back-solved
+from inference results, which meant using it to judge inference was mildly
+circular - `candidates.md` computes a "byte model" prediction from the same
+constant it is validating. This settles it with `test-backend-ops`, which is in
+this tree and needs no model files.
+
+Build it WITHOUT touching the serving build (`build.sh` sets
+`-DLLAMA_BUILD_TESTS=OFF`, so the binary does not exist on the box):
+
+```bash
+export CCACHE_DIR=/root/.ccache
+GLSLC=$(find /root/vksdk -name glslc -type f | head -1)
+cmake -B /root/llama.cpp/build-bench -S /root/llama.cpp -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DGGML_NATIVE=ON \
+  -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=ON -DGGML_CCACHE=ON \
+  -DVulkan_GLSLC_EXECUTABLE="$GLSLC"
+cmake --build /root/llama.cpp/build-bench -j8 --target test-backend-ops
+```
+
+**Two traps in reading its output.** The column labelled `GB/s` is really GiB/s
+(`tests/test-backend-ops.cpp` divides by 1024 three times), so multiply by 1.0737
+before comparing against 89.6. And only ops with no FLOP count report bandwidth
+at all; `MUL_MAT`/`MUL_MAT_ID` report GFLOPS instead.
+
+**Raw memory path**, `perf -b Vulkan0 -o CPY`, converted to decimal GB/s:
+
+| shape | working set | GB/s |
+|---|---|---:|
+| f32 -> f16 [512,3072] | 9 MiB | 81.5 |
+| f32 -> q4_0 [8192,512,2] | 36 MiB | 80.7 |
+| f32 -> f32 [786432,256] | **1.5 GiB** | **76.2** |
+| f32 -> f32 permuted | 64 MiB | 74.6 |
+
+Discard the `ADD` rows: one reported 100.1 GB/s, above the theoretical peak,
+because `op_size` counts a broadcast source at full size while the hardware reads
+it once and caches the rest. `DUP`, `CONT` and `SCALE` have no perf cases.
+
+**What the decode kernel extracts**, `perf -b Vulkan0 -o MUL_MAT_ID` at the
+matvec shape (m=768, n=1, k=2048, 8 of 128 experts = 12,582,912 weights). These
+rows report GFLOPS, which converts exactly: `GB/s = GFLOPS x bpw/16`. Every bpw
+below was read from `ggml_type_size` on the box, not assumed:
+
+| type | bpw | GFLOPS | GB/s | vs f16 |
+|---|---:|---:|---:|---:|
+| f16 (no dequant) | 16.0 | 77.82 | **77.8** | 100% |
+| q4_K | 4.5 | 266.57 | **75.0** | 96.3% |
+| q4_0 | 4.5 | 263.72 | **74.2** | 95.3% |
+| q6_K | 6.5625 | 177.05 | **72.6** | 93.3% |
+| q8_0 | 8.5 | 136.48 | **72.5** | 93.2% |
+| iq2_xs | 2.3125 | 426.81 | **61.7** | 79.3% |
+
+Four conclusions:
+
+1. **The 74 GB/s constant is real.** It lands within 1% of the measured Q4_0
+   matvec rate and 2% of Q4_K, derived here from op timing and block sizes with
+   no reference to any inference measurement. The circularity is resolved.
+2. **There is no kernel headroom on decode.** Q4_K reaches 96% of the f16
+   no-dequant rate and 98% of the largest clean copy. The entire
+   software-addressable gap for K-quants is 3.7%. Stop looking here.
+3. **The IQ-family dequant penalty is confirmed.** `iq2_xs` runs 20.7% below
+   f16. `candidates.md` recorded IQ4_XS missing its byte model by 21% on routed
+   experts. Two independent methods agreeing to within half a point.
+4. **Q4_0 and Q4_K are tied on experts, with the K-quant 1.1% AHEAD.** Flat
+   32-weight blocks do not unpack more cheaply than a 256-superblock two-level
+   scale hierarchy on this backend. Any format whose pitch is "cheaper unpack
+   than a K-quant" has nothing to sell here.
+
+**Not covered:** IQ4_XS is not in the `MUL_MAT_ID` perf case list (the types are
+f32, f16, q4_0, q8_0, q4_K, q6_K, iq2_xs), so `iq2_xs` stands as a proxy for the
+IQ family rather than a direct measurement of the type this box actually serves.
+`balanced` was resident throughout at 17.1 GB VRAM with GPU busy at 0% and load
+average 0.00, so the box was idle but not cold. No DIMM temperature was captured
+- `sensors` is not available inside the LXC, it needs the host.
 
 ### Stage 0 of fast-opt-plan: where decode time goes (2026-08-02)
 

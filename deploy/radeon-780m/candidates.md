@@ -4316,3 +4316,101 @@ Q6_K is scaled from IQ4_XS's back-solved 2054 by the file-size ratio, not
 derived from a per-tensor accounting of this file. That is the same method the
 2026-08-16 entry used, so the comparison between the two rows is internally
 consistent, but both rows inherit whatever error is in the original back-solve.
+
+# The memory ceiling measured directly, and Q4_0 vs Q4_K on experts - 2026-08-17
+
+No model was downloaded for this. It started as a vetting request for
+`kingjones777/Qwen3.8-27B-ROCmFP4-STRIX-MTP-GGUF` and ended up settling three
+standing questions about the box itself, using `test-backend-ops` on synthetic
+tensors. Full method and the raw tables are in `README.md` under "The memory
+ceiling, measured directly"; this entry records what it means for choosing
+models and quants.
+
+## The candidate: rejected, and the format behind it with it
+
+Qwen3.8-27B is a real model (Apache-2.0, dense 27B, vision, 256K, native MTP
+head published separately by ggml-org). The upload is not slop either - the
+redistributed MTP heads and mmproj are byte-size identical to ggml-org's, and
+the card publishes a genuine MTP depth sweep and an honest "not measured" list.
+It still fails here twice over:
+
+- **Dense.** The card states it plainly: all 27B parameters read per token.
+  That is the standing rejection on this box, four times over now.
+- **ROCmFP4 is a tensor format this tree cannot load** - ggml types 100-106,
+  which exist only in the ROCmFPX fork. Porting it is ~25-30 files for a
+  Vulkan+CPU-only subset, sized against this fork's own Q1_0/Q2_0 precedent
+  (50 files touch `Q2_0`).
+
+Stripped of branding, ROCmFP4 is **Q4_0 with a 1-byte UE4M3 scale instead of the
+2-byte fp16 delta**: 32-weight blocks, integer codes, 4.25 bpw against Q4_0's
+4.50. There is no hardware FP4 involved - the Vulkan device string on this box
+reports `fp4: 0`, and gfx1151 has no FP4 units either. Their published gains
+(+10% to +62% decode against Q4_K_M) are several times larger than 10% fewer
+bytes can explain, so the mechanism has to be a cheaper unpack than a K-quant.
+
+**That mechanism does not exist on this backend**, which the Q4_0 control now
+shows directly - see below. The port is not worth doing.
+
+## The measurement
+
+`MUL_MAT_ID` at the matvec shape (m=768, n=1, k=2048, 8 of 128 experts) - the
+routed-expert decode path, the exact one where IQ4_XS lost 21%. GFLOPS converts
+exactly via `GB/s = GFLOPS x bpw/16`, every bpw read from `ggml_type_size`:
+
+| type | bpw | GFLOPS | GB/s | vs f16 |
+|---|---:|---:|---:|---:|
+| f16 (no dequant) | 16.0 | 77.82 | **77.8** | 100% |
+| q4_K | 4.5 | 266.57 | **75.0** | 96.3% |
+| q4_0 | 4.5 | 263.72 | **74.2** | 95.3% |
+| q6_K | 6.5625 | 177.05 | **72.6** | 93.3% |
+| q8_0 | 8.5 | 136.48 | **72.5** | 93.2% |
+| iq2_xs | 2.3125 | 426.81 | **61.7** | 79.3% |
+
+Pure copy, for the ceiling: 76.2 GB/s on a 1.5 GiB f32 copy, 80.7-81.5 GB/s on
+9-36 MiB shapes. Theoretical peak is 89.6, and `dmidecode` on the host confirms
+both DIMMs train at the rated 5600 MT/s, dual-rank, both channels.
+
+## What this closes
+
+1. **The byte model's constant is no longer circular.** ~74 GB/s was a
+   back-solve from inference; it now measures within 1% of the Q4_0 matvec rate
+   and 2% of Q4_K, derived from op timing and block sizes alone. Every byte-model
+   prediction in this file rests on a figure that has now been checked
+   independently, and it held.
+2. **The expert-dequant hypothesis is confirmed, and it is IQ-family specific.**
+   `iq2_xs` runs 20.7% below f16; the 2026-08-16 entry put IQ4_XS at 21% below
+   its byte model. Two unrelated methods, half a point apart. The K-quant and
+   legacy-quant families are bandwidth-bound and predictable; the IQ family is
+   not. **When a quant mix puts IQ-family types on routed experts, discount the
+   byte-model prediction by ~20% before deciding.**
+3. **"Flat blocks unpack cheaper" is false here.** Q4_0 (one scale, 32 weights)
+   against Q4_K (two-level 6-bit hierarchy over 256) is 74.2 vs 75.0 - the
+   K-quant is 1.1% ahead at identical bpw. This is the control the ROCmFPX docs
+   never publish; every table they show is against Q4_K_M with no Q4_0 row.
+
+## What was verified vs. inferred
+
+**Measured this session**: every number above, on the box, `build-bench` at tree
+`033246a`, Vulkan0 confirmed as `AMD Radeon 780M Graphics (RADV PHOENIX)`.
+Production was untouched - `build-vk2` unmodified, `llama-server` active
+throughout.
+
+**Verified**: the memory config from the Proxmox host's `dmidecode` (2x48 GB,
+Rank 2, both channels, Configured 5600 MT/s); every bpw from `ggml_type_size`
+rather than from memory; that the redistributed MTP/mmproj files in the
+candidate repo match ggml-org's byte sizes exactly.
+
+**Inferred, not verified**: that `iq2_xs` represents IQ4_XS. IQ4_XS is **not** in
+the `MUL_MAT_ID` perf case list, so the IQ-family conclusion rests on a proxy
+type plus the earlier real-model result, not on a direct synthetic measurement of
+the type this box actually serves. Adding an IQ4_XS case to the suite would close
+that gap cheaply.
+
+**Discarded**: an `ADD` row reporting 100.1 GB/s, above the theoretical peak,
+because `op_size` counts a broadcast source at full size while the hardware reads
+it once. Recorded because the same trap will inflate any future bandwidth number
+taken from a broadcasting op.
+
+**Not attempted**: DIMM temperature under sustained load (`sensors` is not
+available in the LXC, it needs the host at 192.168.254.222), and the ROCmFP4
+port itself.
