@@ -3976,11 +3976,70 @@ the second candidate ever to break that, by **stalling out on `dup-block` after
 client, it needs **108 turns against `balanced`'s 33**, and `dup-line` failed by
 exhausting the 40-turn limit. It is not blundering: read-before-edit, line-number
 discipline, edit misses and botched calls are all zero, better than KAT ever
-managed. It grinds - many tiny turns, several ending in `no-tool-call` stalls
-that burn a turn producing nothing.
+managed. It grinds - 10, 13, 13, 14 and 18 turns on tasks `balanced` closes in
+4, 4, 4, 6 and 11.
+
+**And it does not end episodes the way the harness expects.** Three of the six
+tasks - `blind-fix`, `numbered`, `stale-edit` - stopped with `no-tool-call`,
+i.e. the model finished the work correctly (all three PASS) and then replied in
+prose instead of calling `Submit`. `balanced` printed no stop line at all, which
+means all six of its episodes ended on `submitted`. `no-tool-call` is the
+episode's terminal state, not a wasted mid-episode turn - an earlier draft of
+this section said the latter and it was wrong. What it indicates is a
+tool-protocol mismatch rather than a capability failure: this is a Qwen coder
+model with a native XML tool-call convention being driven over the `anthropic`
+transport. That is a competing explanation for part of the turn count and it was
+NOT tested here.
 
 Session latency is turns x per-turn time, and this candidate is worse on both
 factors at once: 3.3x the turns at 0.72x the generation speed.
+
+## Is this the quant tier? Step 8 was NOT run - here is what is known
+
+Asked directly after the session, and it deserves a recorded answer rather than
+a shrug. **Step 8 is the one step of the playbook this session skipped**, so the
+honest answer is that it is untested. What the evidence does and does not
+support:
+
+**Against the quantization explanation.** The one effect a higher tier has
+produced consistently across four models is repairing **marginal tool-discipline
+failures** - TD's multi-image comparison, KAT's read-before-edit violation and
+edit miss. This candidate's tool discipline was already perfect: zero
+read-before-edit, zero line-number errors, zero edit misses, zero botched calls,
+across both coding tiers. There is nothing marginal in the place where this
+lever has ever worked. `coder` is the precedent: 0.76% of perplexity, solid at
+61/61, and it changed nothing at all because nothing was marginal.
+
+**For it, and it is not nothing.** The failures are non-termination-shaped -
+`dup-block` stalling after 32 turns, `dup-line` exhausting the 40-turn limit -
+and step 8's central lesson is precisely that a marginal task consumes what the
+quantization left and tips into non-termination. That is TD's signature.
+
+**Unquantifiable here, unusually.** The normal check is how far the tier sits
+from the model's own BF16 - under ~0.3% and the tier is not a lever, ~0.8% and
+it is doing real damage. That number does not exist for this model and cannot be
+borrowed: the tokenizer is qwen2/151936 against the incumbents' qwen35/248320,
+so no cross-model perplexity pairing exists. Within-model tier pairing IS clean,
+but it requires the second tier to exist on disk.
+
+**The throughput half of the verdict might genuinely be the tier, in the
+direction nobody expects.** IQ4_XS measured 22.29 t/s against 28.1 predicted -
+the byte model's worst miss on this box - and the standing hypothesis is that
+IQ4_XS is slow per byte specifically on ROUTED EXPERTS through `MUL_MAT_ID`.
+If that is right, **Q4_K_M could come back FASTER despite carrying 11% more
+bytes per token** (2286 MiB against 2054). So "test the tier up" is not the
+usual trade of speed for quality here; it is a live question in both directions,
+and it settles a box-wide quant heuristic either way.
+
+**What it would have to achieve to change the verdict.** Close a 3.3x turn gap
+and a 27% generation deficit against `balanced`. No tier bump on record here has
+moved any metric by 3x. And the `no-tool-call` finding above offers a competing
+explanation for a chunk of the turn count that a higher tier would not obviously
+fix.
+
+**One thing quantization definitely does not explain: the wedge.** Both arms of
+that comparison ran the same IQ4_XS weights - speculation on hung, speculation
+off did not - so it is the speculation path, not the tier.
 
 ## Where this leaves the model, and the open questions it does not close
 
