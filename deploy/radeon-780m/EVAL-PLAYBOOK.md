@@ -478,3 +478,73 @@ model, not from the same model's other tiers, not from the shape of the failure.
 And **re-run `reason-eval-hard` after any requant**, because termination
 behaviour moved on KAT where its perplexity barely did.
 
+---
+
+## Results, 2026-08-17 - Qwen3-Coder-Next at two tiers
+
+All through the production router, one session, `balanced` re-measured as the
+control in each half. QCN is Qwen/Qwen3-Coder-Next 80B-A3B (arch `qwen3next`,
+512 experts top-10, 12 of 48 layers full attention), at bartowski's IQ4_XS-imatrix
+and Q6_K. **Both tiers rejected; all QCN weights deleted 2026-08-17.** The table
+is kept because it is the calibration for the next 80B-class coder candidate,
+and because it is this repo's only two-tier comparison of one model measured
+end-to-end in a single session.
+
+| | **QCN IQ4_XS** | **QCN Q6_K** | **`balanced`** (control) |
+|---|---|---|---|
+| role | eval | eval | production default |
+| resident (GTT+VRAM) | 45.6 GiB | 66.9 GiB | **27.2 GiB** |
+| speculation | **none** (swept, see below) | none | MTP n-max 2 |
+| tg, 1 stream | 22.29 | 17.94 | **30.87** |
+| pp, 1 stream | 243.2 | 163.5 | **293.2** |
+| per-stream tg, 2 streams | 14.09 | 11.50 | **17.75** |
+| aggregate, 2 streams | 13.49 | 10.00 | **15.24** |
+| perplexity | 2.0231 +/- 0.03066 | **2.0105** +/- 0.03045 | 2.0079 (not re-run) |
+| **reason-eval-hard** | 9/10, 0 trunc, **41 s**, **0c** | 9/10, 0 trunc, 57 s, **0c** | **10/10**, 0 trunc, 206 s, 20.5k |
+| code-eval-hard | **5/6**, 238 s, 67 turns | 6/6, 229 s, 43 turns | 6/6, 199 s, **31 turns** |
+| code-eval-claude | **5/6**, 240 s, 108 turns | 6/6, 272 s, 87 turns | 6/6, **115 s**, **33 turns** |
+| read-before-edit / edit misses | 0 / 0 | **2 / 3** | 0 / 0 |
+| vision | no mmproj published | no mmproj published | 4/4 |
+
+Perplexity pair, per-chunk over 20-80. Only the within-model pair exists: QCN's
+tokenizer is qwen2/151936 against the incumbents' qwen35/248320, so **no
+cross-model pairing was available for this candidate at all**.
+
+| pair | lower at | reading |
+|---|---|---|
+| QCN-Q6_K vs QCN-IQ4_XS | **61/61, zero flips** | solid, 0.623% |
+
+**Drafter sweep** (step 3, `spec-sweep.sh`, real prompts, both concurrencies).
+QCN has no MTP head, so this was the first candidate here to sweep two EXTERNAL
+drafters - z-lab's DFlash 0.5B and thoughtworks' Eagle3 145M, aggregate t/s:
+
+| | 1 stream | 2 streams |
+|---|---|---|
+| none | 12.54 / 12.95 | **14.18 / 14.04** |
+| DFlash, best | **13.48** (n3 p0.75, +5.7%) | 12.74 (n2, -10.2%) |
+| Eagle3, best | 11.27 (n1, -10.1%) | 11.22 (n1, -20.9%) |
+
+DFlash beat Eagle3 on every axis - acceptance 0.805 against 0.574 at the same
+n-max 3 - and still lost to shipping nothing at the concurrency this box serves.
+**Both drafters also wedged slots**, 7 of 21 speculated cells; see the wedge
+bullet under step 3.
+
+Conclusions this session added:
+
+- **A non-thinking model can score 9/10 on `reason-eval-hard`.** QCN answered
+  most items in 1.0-1.4 s with **zero chars of reasoning**, the whole tier in
+  41 s against `balanced`'s 206. It is the first model here to get near the top
+  of that tier without a thinking channel, and it never truncated. It still lost
+  the tier 9/10 to 10/10, failing the same item at both tiers on the same
+  anti-pattern - so that miss is the model, not the tier.
+- **`code-eval-hard` is no longer saturated.** Six models scored 6/6 before
+  this; QCN at IQ4_XS scored 5/6 by stalling out on `dup-block` after 32 turns.
+  The tier repaired it. The bench still discriminates.
+- **Turns are the axis that killed it**, not the score. At Q6_K it reaches 6/6
+  on both coding tiers - what `balanced` already has - needing 2.6x the turns at
+  2.4x the wall clock and 2.5x the pool.
+- **The byte model is calibrated for K-quants, not for IQ4_XS on routed
+  experts.** Same weights, same `MUL_MAT_ID` path, two quant types: Q6_K
+  predicted 18.3 t/s and measured 17.94 (-2%), where IQ4_XS predicted 28.1 and
+  measured 22.29 (**-21%**). Narrow the "IQ4_XS is smaller AND faster"
+  heuristic, not the bytes-per-token model.
