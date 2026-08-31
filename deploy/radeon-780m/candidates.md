@@ -4706,3 +4706,185 @@ because both halves share the prompt and the session; neither absolute value is.
 `gemma4-eval` still owes step 3 before any tier result means anything, and the
 two dense candidates owe the positive no-MTP-head confirmation - though the 12B's
 drafter loading and accepting 0.632 already settles that it HAS one.
+
+---
+
+# Qwen3.8-Flash-Next REAP-256 "duo" vetted on paper - REJECTED - 2026-08-31
+
+`AnonimousA/Qwen3.8-Flash-Next-REAP-256-duo-GGUF`, requested by name. Step 0 of
+`EVAL-PLAYBOOK.md` only: **no weights were downloaded**, both shard headers were
+range-fetched (50 MB + 20 MB) and every number below comes from the tensor
+tables. The candidate fails at gate 1 and never reached steps 1-9, so there is
+no measured throughput, no eval tier, no perplexity and no sweep for it.
+
+It is a real, carefully built upload with an unusually honest model card - the
+rejection is about this box, not about the work.
+
+## The model
+
+| check | finding |
+|---|---|
+| arch | **`qwen4exp`** - absent from the serving `libllama.so` AND from the whole tree |
+| base | `Qwen/Qwen3.8-Flash-Next`, `size_label` 512x56B, 116.5B total params |
+| pruning | REAP, 512 -> **256 experts** per layer, top-10 + 1 shared unchanged |
+| MoE | yes, 48 blocks, `expert_ff` 640, `embedding_length` 2560 |
+| attention | GDN hybrid, `full_attention_interval` 4 -> **12 of 48 full-attn** |
+| extras | Qwen Sparse Attention indexer (top_k 2048), hyper-connections (`hc_*`), n-gram PLE block |
+| ctx | 262144 native |
+| tokenizer | `gpt2` / pre `qwen35` / **248320 - identical to the incumbents** |
+| MTP | blocks 0..47 across both shards, no `blk.48`, no `nextn.*` KV, no `mtp-*` file -> **none** |
+| vision | template carries image/video pad tokens and `ple.image_token_id`, but **no mmproj published** |
+| tiers | **one only** - Unsloth `UD-Q3_K_XL`, 2 shards, 44.86 + 12.83 = 57.69 GiB |
+| licence | `qwen-community-1.0`, not Apache |
+
+## Why it is rejected
+
+**1. The arch cannot be loaded, and not merely because build-vk2 is stale.**
+`strings build-vk2/bin/libllama.so | grep -x qwen4exp` is empty, and so is
+`grep -rn qwen4exp` over the entire checkout - `.cpp`, `.h`, `.py`, gguf-py and
+convert scripts alike. The serving library knows `qwen2moe qwen2vl qwen3 qwen35
+qwen35moe qwen3moe qwen3next qwen3vl qwen3vlmoe` and nothing else in the family.
+The model card is straightforward about this: `qwen4exp` merged into llama.cpp
+mainline on **2026-08-27** (ggml-org/llama.cpp#27742) and "releases older than
+2026-08-27 will refuse the file". This fork's last non-deploy commit is
+`5106d77`, 2026-08-11.
+
+So unlike ROCmFP4 (2026-08-17), which needed a 25-30 file port of a tensor
+format that exists only in a vendor fork, this one is **curable by an upstream
+sync plus a full `build-vk2` rebuild**. That is not free: every tuning figure in
+this repo is measured against a specific binary, the standing preference is that
+updates are deliberate and never automatic, and a rebuild re-opens ubatch, the
+`MUL_MAT_VEC_ID_MAX_COLS` pin and both aliases' spec sweeps. Worth paying only
+if the model were otherwise attractive. It is not - see below.
+
+**2. Throughput. 5.640 GB active per token, a 10.7 t/s ceiling.**
+
+| | total GiB | active GB/token | share of per-token bytes |
+|---|---:|---:|---:|
+| n-gram PLE + token embd (**gathers**) | 27.45 | **0.000** | 0% |
+| all 256 routed experts | 26.00 | 1.090 | 19.3% |
+| attention (incl. indexer, GDN) | 2.09 | 2.239 | **39.7%** |
+| norms / hyper-connections / misc | 1.31 | 1.406 | 24.9% |
+| LM head | 0.49 | 0.529 | 9.4% |
+| shared/dense FFN | 0.35 | 0.377 | 6.7% |
+| **total** | **57.68** | **5.640** | |
+
+At the GDN-hybrid 60.5 GB/s that is a **10.7 t/s ceiling, and a realised band of
+9.1-11.3 t/s** on the recalibrated 0.85-1.05 fraction (below). It has **no MTP
+head**, so the ~30% speculation credit both production aliases collect is
+unavailable and the drafter sweep of step 3 has nothing to sweep - that band is
+what it would actually serve.
+
+The cleanest way to see it avoids the bandwidth constant entirely. `balanced` is
+2.542 GB/token and serves **30.87 t/s** on this box; this candidate is 5.640, a
+**2.22x** byte ratio, on the same backend and the same GDN attention shape. Take
+`balanced`'s speculation credit off (30.87 / 1.30 = 23.7 unspeculated), divide by
+2.22, and the candidate lands at **10.7 t/s** - the same number the ceiling gives,
+derived from a measurement on this box rather than from a constant.
+
+So: roughly **a third of the incumbent's served throughput**, with no speculation
+lever to recover it and no second tier published to trade against. Its IQ3_XXS
+experts also fall under the 2026-08-17 IQ-dequant finding, which would push it
+further down, though experts are only 19.3% of its per-token bytes so that
+discount is worth ~4% here rather than the ~20% it cost QCN.
+
+**3. Pool fit is marginal at best.** 57.68 GiB of weights + ~3.19 GiB KV
+(computed: 12 full-attn layers x 2 kv heads x 512 x 262144 at q8_0) + ~0.36 GiB
+GDN recurrent state at `parallel 3` = **61.2 GiB before any compute or graph
+buffer**. Add the step-6 first-request step - 9.1 GiB measured on `balanced`,
+and graph buffers scale with the model - and it lands around 70+ GiB against a
+76 GiB pool. That is ~92% with no margin, on a box whose allocation failures
+have twice needed a hard power cycle of the host.
+
+**4. The author has superseded it.** The card's own banner points at
+`AnonimousA/Qwen3.8-Flash-Next-REAP-320-GGUF`: K=256 prunes too deep, 89.6%
+HumanEval here against 96.3% at K=320, and "roughly half the general-knowledge
+fabrication rate". Evaluating the deprecated build would answer a question its
+author has already withdrawn.
+
+## What is worth keeping from this
+
+**Expert pruning cannot buy throughput on an architecture shaped like this, and
+the byte table says so before any measurement.** Only **19.3% of per-token bytes
+are experts** - REAP attacks 26 GiB of a file whose per-token cost is dominated
+by attention (39.7%). And because top-10 routing is unchanged, pruning does not
+alter active expert bytes at all. The card measured exactly this honestly and
+independently: 22.0 vs 21.5 tok/s decode with both models on CPU, "a tie", with
+the gain confined to prefill (1.58x) where a batch sweeps many distinct experts.
+That is the third model here to come in at ~2/3 to 4/5 of per-token bytes
+*outside* the experts (KAT 68%, gemma4-26B 67%, this 81%) - **on this class of
+model the expert tier is not the lever, and neither is the expert count.**
+
+**48% of this file is an embedding table that costs nothing per token.** The
+26.8 GiB `per_layer_token_embd` is an n-gram PLE gather - 16 heads x ~20M rows x
+160 dims at IQ4_NL, addressed by a 3-gram hash - so a token reads a few KB of
+it. It still has to be *resident*, which is what makes the model heavy without
+making it slow. Bytes-on-disk and bytes-per-token diverge by 10x here; do not
+size either from the other.
+
+**The tokenizer is `qwen35`/248320, the same as `fast` and `balanced`.** So
+unlike Qwen3-Coder-Next and the gemma4 pair, cross-model paired perplexity
+against the incumbents *would* be available for the REAP-320 successor if it is
+ever fetched. Worth knowing before someone re-derives that hole.
+
+## A bug this found in `bytes-per-token.py`, now fixed
+
+The tool's first answer for this file was **34.337 GB active per token and a 2.0
+t/s ceiling**, and its "file total weights" was 77.70 GiB for a 57.69 GiB file.
+Both were wrong, from two independent defects:
+
+- **Unknown quant types were silently priced at F16.** `QT` had no entry for
+  ggml type 18, so every `ffn_gate_exps`/`ffn_up_exps` tensor - IQ3_XXS, 3.0625
+  bpw - was costed at 16 bpw, a 5.2x overcharge on 82 tensors. The fallback was
+  `BPW.get(qt, 16.0)`, which fails silently and in the dangerous direction.
+- **Embedding tables were counted as read in full every token**, which is
+  harmless for a 0.6 GiB `token_embd` and catastrophic for a 26.8 GiB PLE table.
+
+Fixed alongside this entry: the full ggml type table 0-39 (every IQ
+type, TQ1_0/TQ2_0, Q8_K, the integer types), `token_embd`-matching tensors moved
+to a new `EMBD/LUT` group excluded from active bytes, an explicit **WARNING**
+line when an unknown type is hit rather than a silent F16 assumption, and the
+GDN-hybrid 60.5 GB/s selected automatically when the KV block carries `ssm.*`.
+
+Validation: corrected totals are **44.85 and 12.83 GiB** against real file sizes
+of 44.86 and 12.83. The prior 77.70 GiB figure was 35% high.
+
+**The fix invalidated the playbook's realised-fraction band, which has been
+recalibrated with it.** The old 0.45-0.75 was compensating for the over-count; on
+real active bytes the model is near-exact. Reduced to unspeculated tg on this
+box: `balanced` 23.75 measured against a 23.8 ceiling (**1.00**), `fast` 26.12
+against 25.3 (**1.03**), and QCN-Q6_K 17.94 against a recomputed 19.8
+(**0.90**). The QCN point is the one to trust - it has no MTP head, so unlike the
+incumbents it assumes no speculation credit. Band is now **0.85-1.05**, and the
+tool prints the two standing corrections (MTP +30%, IQ-family on routed experts
+-20%) rather than leaving them to memory.
+
+Note this makes the byte model *more* optimistic, so it cannot be the reason any
+past candidate was rejected - but a future one could have been wrongly rejected
+by it, which is why it is fixed rather than noted.
+
+**Any per-token figure in this file produced before 2026-08-31 for a model using
+IQ3_XXS, IQ2_*, IQ1_*, IQ3_S or TQ* on any tensor is overstated**, as is any
+figure for a model with a large untied embedding table. The gemma4 tables above
+are unaffected on the type axis (Q4_K_M/Q6_K only) but their "tied LM head /
+embd" row counts a tied embedding in full, which is correct for a tied head and
+would not be for an untied one.
+
+## What was verified vs. inferred
+
+**Verified**: the arch string's absence from both the serving library and the
+tree; both shard headers parsed from range-fetched prefixes; the corrected byte
+totals against the HF API's file sizes; the block range 0..47 across both shards;
+the tokenizer model and token count; that the repo publishes exactly one tier and
+no mmproj.
+
+**Computed, not measured**: the 3.19 GiB KV figure and the ~70 GiB resident
+estimate. The 9.1 GiB first-request step is `balanced`'s measured value carried
+across to a much larger model, which is the weakest link in that estimate.
+
+**Inferred**: that upstream `qwen4exp` support would load this file on a rebuilt
+`build-vk2` - the card reports it verified on mainline `ca3d5a3`, and nothing was
+tested here.
+
+**Not attempted**: the fetch, and every step from 1 onward. No file was
+downloaded, no stanza added, `router.ini` untouched, production untouched.

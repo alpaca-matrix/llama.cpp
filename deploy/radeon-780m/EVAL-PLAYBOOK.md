@@ -73,9 +73,21 @@ the full KV (truncating only the token/score/merge arrays to their lengths), the
 type - which is where "does this have an MTP head" and "is this dense" get
 answered in one read. `bytes-per-token.py` then computes the throughput estimate
 from that same table, weighting `*_exps` tensors by
-`expert_used_count / expert_count` and counting everything else in full, so the
-prediction comes from real shapes and real quant types rather than from a file
-size and an assumed active fraction.
+`expert_used_count / expert_count`, excluding `token_embd`-style tables as
+gathers, and counting everything else in full, so the prediction comes from real
+shapes and real quant types rather than from a file size and an assumed active
+fraction. It picks 60.5 GB/s automatically when the KV block carries `ssm.*`.
+
+**Read its output, do not just take the last line.** Two failure modes were live
+in it until 2026-08-31 and both were silent: an unknown quant type fell back to
+**F16** (IQ3_XXS priced at 16 bpw instead of 3.0625, a 5.2x overcharge), and
+embedding tables were counted as read in full every token, which is nothing for a
+0.6 GiB `token_embd` and catastrophic for Qwen3.8-Flash-Next's 26.8 GiB n-gram
+PLE table. Together they turned 5.6 GB/token into 34.3. Both are fixed - unknown
+types now print a **WARNING** line - but the check that caught it is the one to
+keep doing: **the tool prints `file total weights`, so compare it against the
+real file size from the HF API before believing anything downstream of it.** It
+was 35% high on that file, which is what exposed both bugs.
 
 50 MB answers the questions that decide whether to spend 30 GB. Used
 2026-08-15 on three candidates: it found two of them had their MTP head dropped
@@ -100,8 +112,19 @@ grep -x <arch>` answers it in one command; the source having the arch proves onl
 that a rebuild would.
 
 **Throughput estimate.** `tg_ceiling = bandwidth / (active_params x bytes_per_param)`,
-using **60.5 GB/s for a GDN hybrid** and 70 GB/s otherwise. Realised fraction
-lands 0.45-0.75. This sets a ceiling, never a forecast: TD's Q6 tier was
+using **60.5 GB/s for a GDN hybrid** and 70 GB/s otherwise.
+
+**Realised fraction is 0.85-1.05, not the 0.45-0.75 this file said until
+2026-08-31.** That old band was compensating for the over-counting bug described
+above; once active bytes are real, the model is near-exact. Three points on this
+box, all K-quant and all reduced to UNSPECULATED tg: `balanced` 1.00, `fast`
+1.03, QCN-Q6_K **0.90**. Trust the last one most - it has no MTP head, so it
+assumes nothing, where the incumbents' figures divide out an assumed ~30%
+speculation credit. Two standing corrections still apply on top: an MTP head adds
+~30%, and **IQ-family types on routed experts run ~20% under** the prediction
+(2026-08-17).
+
+This sets a ceiling, never a forecast: TD's Q6 tier was
 predicted at -25.7% against Q4 from the weight ratio and measured -14.1%,
 because KV and activations do not scale with the tier.
 
