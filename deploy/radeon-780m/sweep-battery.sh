@@ -50,7 +50,10 @@ for conc in $CONC_LIST; do
     if CONC="$conc" LOG="$cell.server.log" \
        timeout 1200 "$HERE/spec-sweep.sh" "$MODEL" "$nmax" '' "$p" \
        > "$cell.out" 2>&1; then
-      grep -E "tg |aggregate|prompt|acceptance|per-stream" "$cell.out" | tee -a "$SUMMARY" || true
+      # -i matters: spec-sweep prints RESULT and AGGREGATE in caps, and
+      # AGGREGATE is the honest metric at CONC > 1 - a case-sensitive pattern
+      # silently drops the one line the sweep exists to produce.
+      grep -iE "^ *(RESULT|AGGREGATE)|acceptance" "$cell.out" | tee -a "$SUMMARY" || true
     else
       rc=$?
       # 124 is timeout(1). A cell that never returns is a result: a config that
