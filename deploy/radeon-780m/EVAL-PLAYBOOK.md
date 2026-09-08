@@ -27,6 +27,22 @@ what has already been tested and rejected. This file is the method.
 Steps 3-8 are cheap and can kill a candidate. Step 9 is expensive and only
 matters for one that survived.
 
+**Before any of them: confirm this container is the only running Proxmox
+guest.** pve2 hosts 15 guests and CT 250 is one of them; they share the host's
+memory controller, which is the single resource generation is bound by here.
+Nothing inside the container can see them - `pgrep` finds no competing process,
+lxcfs virtualizes `/proc/loadavg`, and the number comes out low and plausible.
+
+```sh
+ssh -i ~/.ssh/id_ed25519_llamalxc root@192.168.254.222 'pct list; qm list'
+```
+
+Everything except CT 250 must read `stopped`. `bench-guard.sh` enforces this
+when `PVE_HOST` is set and warns loudly when it cannot reach the host, which is
+the default because the container holds no key to pve2. Requested as a standing
+pre-flight by the user on 2026-09-08, who had shut the other guests down by
+hand and wanted the check made every time rather than remembered.
+
 **Step 3 gates step 5.** Do not run an eval tier until the sweep has settled the
 draft length, including on models believed to have no drafter - the sweep at
 n-max 0 is also how you get the 1- and 2-stream throughput baseline, and this
