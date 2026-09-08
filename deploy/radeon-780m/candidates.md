@@ -4888,3 +4888,129 @@ tested here.
 
 **Not attempted**: the fetch, and every step from 1 onward. No file was
 downloaded, no stanza added, `router.ini` untouched, production untouched.
+
+# Ornith-1.5-35B-A3B: two tiers, fully evaluated, both rejected (2026-09-08)
+
+Evaluated as a replacement for `fast` or `balanced`. Steps 0 through 7 all run
+in one session. Verdict: **reject for both slots**, decisively for `balanced`
+and on throughput for `fast`.
+
+## What was tested
+
+| alias | file | tier |
+|---|---|---|
+| `ornith15-eval` | SC117 APEX I-Quality, 22.08 GiB | mixed: experts Q6_K/Q5_K/IQ4_XS by block band, attn Q6_K |
+| `ornith15-q6-eval` | ornith-ai (first-party) Q6_K, 27.19 GiB | uniform Q6_K including the MTP head |
+
+Both are `qwen35moe`, 41 blocks (40 + native MTP), 256 experts top-8,
+`full_attention_interval` 4, tokenizer gpt2/qwen35 248320 - the same geometry
+and the same tokenizer as both incumbents, so every comparison below is paired
+on identical tokenization. The chat template is byte-identical to the one
+`balanced` serves.
+
+Five other tiers were rejected on paper, from 50 MB header prefixes. The two
+worth repeating: **jashepp's MXFP4 hybrid has `block_count` 40 and no `blk.40`**
+- the MTP head is dropped, ~30% of generation - and it is 18.42 GiB yet 2.661
+GB/token because its attention is Q8_0, heavier per token than the 27 GiB Q6_K.
+**bartowski's Q6_K quantizes the MTP head to Q4_0.** A small file is not a fast
+file on this box.
+
+## Step 5, all four aliases in one session
+
+| | `fast` | `balanced` | I-Quality | Q6_K |
+|---|---|---|---|---|
+| role | control | control | candidate | candidate |
+| tg 1 stream | **33.86** | 31.00 | 30.66 | 33.11 |
+| pp 1 stream | **347.4** | 310.3 | 346.8 | 311.4 |
+| 2-stream aggregate | **17.60** | 16.52 | 17.15 | 16.26 |
+| draft acceptance | 0.835 | **0.847** | 0.835 | 0.823 |
+| **reason-eval-hard** | 6/10, **4 TRUNC**, 1260 s, 119.1k | **10/10, 0 TRUNC**, 204 s, 20.5k | 6/10, 0 TRUNC, 209 s, 17.2k | 6/10, 0 TRUNC, 350 s, 30.7k |
+| code-eval-claude | 6/6, 138 s, 44 t | 6/6, **114 s, 33 t** | 6/6, 217 s, 64 t | 6/6, 200 s, 57 t |
+| code-eval-hard | 5/6, 165 s, 27 t | **6/6**, 211 s, 31 t | 5/6, 286 s, 28 t | 5/6, 355 s, 26 t |
+| vision | 3/4 (1 TRUNC) | **4/4** | 3/4 | **4/4** |
+| perplexity | 2.0183 | **2.0079** | 2.1339 | 2.1322 |
+
+Paired per-chunk ordering, chunks 20-80:
+
+| pair | lower at | flips | delta | reading |
+|---|---|---|---|---|
+| Q6_K vs I-Quality | 11/61 | 11 | -0.080% | **wash** - the tiers are equivalent |
+| Q6_K vs `balanced` | 0/61 | 0 | +6.191% | **solid** - `balanced` better |
+| I-Quality vs `fast` | 0/61 | 0 | +5.728% | **solid** - `fast` better |
+| `balanced` vs `fast` | 51/61 | 10 | -0.515% | wash, as recorded |
+
+Both incumbents reproduced their recorded perplexity to four decimals across
+three weeks, a host reboot and a rebuilt binary - `balanced` 2.0079 and `fast`
+2.0183 +/- 0.02510 - which is the third confirmation that step 7 is
+bit-reproducible here.
+
+## Why `balanced` keeps its alias
+
+Not close. The Q6_K candidate buys **+6.8% single-stream generation** and gives
+back: four correct answers on the tier built to discriminate, **1.75x the turns
+and 1.75x the wall clock** on the client actually in use, 5/6 instead of 6/6 on
+code-eval-hard, and 6.2% perplexity at 61 of 61 paired chunks with zero flips.
+It does not even win the two-stream aggregate this box is tuned for, 16.26
+against 16.52.
+
+Note how completely this reverses the published case. Ornith 1.5 reports
+SWE-bench Verified 79 and claims it "significantly outperforms its similar-sized
+peer Qwen3.6-35B across all coding and agentic benchmarks". `balanced` IS a
+community reasoning-distill of that exact peer, and it wins every quality tier
+here while needing 33 turns to the candidate's 57.
+
+## Why `fast` keeps its alias, less comfortably
+
+The candidates have a real argument: both scored 6/10 with **zero truncations**
+where `fast` scored 6/10 with **four**, in a sixth of the wall clock (209 s
+against 1260 s) and a seventh of the reasoning volume. The Q6_K candidate also
+takes vision 4/4 where `fast` truncates the compare item.
+
+It loses anyway, on the axis the alias exists for. `fast` wins tg (33.86 against
+30.66 for I-Quality), pp (347.4 against 311.4 for Q6_K), the two-stream
+aggregate by 7.6%, turns on code-eval-claude (44 against 57 and 64), and
+perplexity at 61 of 61. A slot kept for raw speed does not change hands to a
+model that is slower at two streams.
+
+**Flagged for follow-up, not resolved here:** `fast` scored WORSE this session
+than its own record - 6/10 with 4 truncations against 8/10 with 1 and 9/10 with
+1 previously. Same character (it burns tokens without concluding), worse roll.
+If that reproduces it is a `fast` problem worth its own investigation, and it is
+the reason this table does not read as "the candidates nearly won".
+
+## The finding worth carrying: APEX costs acceptance, not perplexity
+
+The two tiers are the same weights at two bit allocations, so everything that
+differs between them is the quant. Perplexity says they are identical - 11/61
+with 11 flips, 0.08%. Every other measurement says otherwise:
+
+| | I-Quality | Q6_K |
+|---|---|---|
+| draft acceptance @ n_max 2 | **0.688** | **0.903** |
+| draft acceptance @ n_max 3 | 0.585 | 0.868 |
+| best 1-stream tg | 29.38 (n_max 1) | 33.28 (n_max 3) |
+| vision | 3/4 | 4/4 |
+
+I-Quality's MTP head is at HIGHER precision than Q6_K's - Q8_0 against Q6_K - so
+this is not drafter quant. It is the target: APEX puts IQ4_XS on the middle 20
+blocks of routed experts, which moves the target's distribution away from what
+the co-trained head predicts, and the drafts stop verifying. The head then has
+to be run at n_max 1 to stay useful, which throws away most of the speculation
+win.
+
+Consequence: **the 27.19 GiB file generates faster than the 22.08 GiB one**,
+33.28 against 29.38 single-stream, inverting the bytes-per-token prediction of
+23.8 against 25.1. The byte model has no term for acceptance and cannot get this
+right - see EVAL-PLAYBOOK step 3. And the vision row is step 8 again: one tier
+up fixes multi-image, exactly as it did for `balanced` in August.
+
+## What it cost
+
+A GPU wedge and a forced host reset. The step-5 driver requested the next alias
+while the previous 27 GiB model was still resident, under models-max 1; the load
+died with "radv/amdgpu: Not enough memory for command submission" ->
+ErrorDeviceLost, the router retried, and the retry stuck in uninterruptible D
+state at `drm_suballoc_new` holding ~38 GB. SIGKILL does not touch a D-state
+task, `systemctl stop` hung on it, and a graceful `reboot` deadlocked with every
+systemd job in "stop waiting". `head-to-head.sh` now swaps by restarting the
+unit, which tears the tree down before the next model is asked for.
