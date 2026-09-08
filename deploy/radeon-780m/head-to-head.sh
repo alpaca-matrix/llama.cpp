@@ -24,8 +24,11 @@ ALIASES=("$@")
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 HOST="${HOST:-http://127.0.0.1:8080}"
-# probe and conc are cheap and gate the reading of everything else, so they run
-# first; perplexity is last because it is a tie-breaker and never promotes.
+# probe and conc are cheap and gate the reading of every tier after them - wall
+# time and turns are read against throughput - so they run first. reason follows
+# because it is the tier that actually discriminates. Perplexity is not here: it
+# runs against files rather than aliases, and step 7 is a tie-breaker that never
+# promotes anything.
 TIERS="${TIERS:-probe conc reason codeclaude vision codehard}"
 
 mkdir -p "$OUT"
@@ -38,18 +41,43 @@ note "aliases: ${ALIASES[*]}"
 note "tiers:   $TIERS"
 note ""
 
-# One warm request per alias before it is measured. The first request after a
-# load costs ~9 GiB of lazily-allocated buffers and is not representative;
-# measuring it as if it were is how a swap gets misread as a leak.
-warm() {
-  curl -s -m 300 "$HOST/completion" -H 'Content-Type: application/json' \
-    -d "{\"model\":\"$1\",\"prompt\":\"hello\",\"n_predict\":8,\"temperature\":0}" \
-    >/dev/null 2>&1 || true
+# Swap models by RESTARTING THE UNIT, not by requesting the next alias.
+#
+# This wedged the GPU on 2026-09-08 and cost a host power cycle. Under
+# models-max 1 a request for alias B while alias A is resident asks the router
+# to load B before A's pool is released; two 27 GiB models plus first-request
+# buffers do not fit in 76 GiB, so the load dies with
+# "radv/amdgpu: Not enough memory for command submission" -> ErrorDeviceLost,
+# the router retries, and the retry sticks in uninterruptible D state at
+# drm_suballoc_new holding ~38 GB. SIGKILL does nothing to a D-state task and
+# systemctl stop then hangs on it too.
+#
+# Restarting the unit tears the whole process tree down first, so the pool is
+# provably empty before the next model is asked for. It costs one reload per
+# alias, which is the price of not doing that again.
+swap_to() {
+  local alias="$1"
+  systemctl restart llama-server
+  # Wait for the router itself, then for the alias to answer. A request during
+  # the load window is the thing that started all this, so ask once and be
+  # patient rather than polling hard.
+  sleep 10
+  local deadline=$(( $(date +%s) + 900 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if curl -s -m 600 "$HOST/completion" -H 'Content-Type: application/json' \
+         -d "{\"model\":\"$alias\",\"prompt\":\"hello\",\"n_predict\":8,\"temperature\":0}" \
+         2>/dev/null | grep -q '"content"'; then
+      return 0
+    fi
+    sleep 20
+  done
+  echo "  FAILED to bring up $alias within 900 s" | tee -a "$LEDGER"
+  return 1
 }
 
 for alias in "${ALIASES[@]}"; do
   note "########## $alias ##########"
-  warm "$alias"
+  swap_to "$alias" || { note "  SKIPPED - would not load"; continue; }
   for tier in $TIERS; do
     log="$OUT/$alias.$tier.log"
     start=$(date +%s)
