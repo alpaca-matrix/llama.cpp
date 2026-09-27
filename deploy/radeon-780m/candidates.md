@@ -5014,3 +5014,87 @@ state at `drm_suballoc_new` holding ~38 GB. SIGKILL does not touch a D-state
 task, `systemctl stop` hung on it, and a graceful `reboot` deadlocked with every
 systemd job in "stop waiting". `head-to-head.sh` now swaps by restarting the
 unit, which tears the tree down before the next model is asked for.
+
+# Qwen3.8-35B-A3B-Distill (empero-ai): step 3 swept - 2026-09-27
+
+Candidate for `balanced` and `fast`. An off-policy distill of Qwen3.8 teachers
+(2.4T-A95B and Flash-Next) into the Qwen3.6-35B-A3B base - the same base
+`balanced` is a community distill of. Released 2026-09-16. Alias `q38d-eval`.
+**Steps 0-3 only.** No eval tier, no perplexity, no step 4 yet.
+
+## Step 0, from a 50 MB header prefix
+
+| check | finding |
+|---|---|
+| arch | `qwen35moe`, in build-vk2 - no upstream sync needed |
+| blocks | 41 (40 + 1 native MTP), `blk.40.nextn.*` at Q6_K, `nextn_predict_layers` 1 |
+| MoE | 256 experts |
+| tokenizer | pre `qwen35` - same as both incumbents, paired perplexity available |
+| tier | uniform Q6_K (file_type 18), 27.20 GiB, within 3 KB of `balanced`'s file |
+| vision | repo's own mmproj, 0.84 GiB; card says the vision path was not trained |
+| evidence | lm-eval only: MMLU -0.004, ARC-Challenge +0.034/+0.044. No SWE-bench, no GPQA |
+
+The card says the distill updated attention and experts and says nothing about
+the MTP head. That made the graft penalty (gemma4 12B, 0.632 against 0.872) the
+question step 3 had to answer before anything else was worth running.
+
+## Step 3, one session, `balanced` re-run as the control
+
+Spare port, `PROMPT_FILE=src/llama-context.cpp`, parallel 3, cols 12, p_min 0,
+`sweep-battery.sh`. All other pve2 guests stopped, production unit stopped.
+Logs under `/root/models/sweep-q38d*`.
+
+| n_max | 1-stream tg | 1-stream agg | accept | 2-stream agg | accept |
+|---|---|---|---|---|---|
+| 0 | 23.76 | 13.99 | - | 16.00 | - |
+| 1 | 28.82 | 15.32 | 0.906 | **17.08** | 0.924 |
+| 2 | 30.70 | **16.36** | 0.833 | 16.98 | 0.859 |
+| 2 (repeat) | 30.71 | 16.02 | 0.833 | 17.44 | 0.861 |
+| 3 | 28.38 | 15.86 | 0.717 | **17.08** | 0.818 |
+| 4 | 31.07 | 12.68 | 0.760 | 11.70 | 0.607 |
+
+p_min at n_max 2:
+
+| p_min | 1-stream tg | 1-stream agg | accept | 2-stream agg | accept |
+|---|---|---|---|---|---|
+| 0 (mean of 2) | 30.71 | 16.19 | 0.833 | 17.21 | 0.860 |
+| 0.3 | 31.12 | 16.52 | 0.883 | 17.06 | 0.844 |
+| 0.5 | 30.42 | 16.19 | 0.898 | 16.69 | 0.906 |
+
+Control, `balanced` (TD-Q6_K), same session, same harness:
+
+| | 1-stream tg | 1-stream agg | accept | 2-stream agg | accept |
+|---|---|---|---|---|---|
+| n_max 0 | 23.71 | 14.55 | - | 16.79 | - |
+| n_max 2 | **32.00** | **16.71** | **0.896** | **17.90** | **0.882** |
+
+## Reading
+
+**Settings: n_max 2, p_min 0.** n_max 2 wins single-stream outright; at two
+streams n_max 1, 2 and 3 sit inside the ~3% noise floor the repeat measured
+(16.98 against 17.44 on an identical config). p_min 0.3 is also inside noise at
+both concurrencies, so the stanza keeps `balanced`'s p_min 0. n_max 4 is out:
+prefill collapses (182 and 89 t/s) and aggregate falls 22-31%, the same cliff
+Ornith 1.5 Q6_K hit.
+
+**The head works; it is not an untrained graft.** 0.833 at n_max 2 is nowhere
+near the 0.63 an orphaned head gave gemma4. But it is **6.3 points under
+`balanced`** at one stream and 2.3 under at two, and the tg cost follows: -4.1%
+single-stream (30.70 against 32.00), -3.9% two-stream aggregate on the mean of
+two runs (17.21 against 17.90). Most plausibly the head was carried over from
+the base rather than retrained with the distill, and the target has drifted a
+little away from it. Consistent with that: acceptance decays faster with draft
+depth than any recent Q6_K here (0.717 at n_max 3 single-stream, against
+Ornith 1.5 Q6_K's 0.868).
+
+**Prefill is ~9% behind `balanced` on identical geometry** (291 against 318
+single-stream, 144 against 157 at two streams, both unspeculated), and that is
+where the two-stream unspeculated gap (16.00 against 16.79) comes from.
+Generation at n_max 0 is identical (23.76 / 23.71), as the matching file size
+predicts. Not explained here; worth a look only if the model earns a step 5.
+
+**Throughput verdict: it can contest `balanced`, not `fast`.** It is ~4% slower
+than `balanced` on the axis `balanced` is not held for, so step 5 decides it on
+quality alone. It has no case for `fast`, which beats `balanced` itself on raw
+speed. Next is step 4 (confirm n_max 2 on 8080 through the router), then step 5
+against `balanced` in one session.
