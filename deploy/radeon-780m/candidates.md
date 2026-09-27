@@ -5098,3 +5098,61 @@ than `balanced` on the axis `balanced` is not held for, so step 5 decides it on
 quality alone. It has no case for `fast`, which beats `balanced` itself on raw
 speed. Next is step 4 (confirm n_max 2 on 8080 through the router), then step 5
 against `balanced` in one session.
+
+## Steps 4, 5 and 7 - one session, 2026-09-28
+
+`head-to-head.sh /root/models/h2h-q38d q38d-eval balanced`, all six tiers,
+through the router on 8080 at production settings (n_max 2, p_min 0 for both).
+All other pve2 guests stopped. Then `llama-perplexity` on both files with the
+unit stopped. Ledger in `/root/models/h2h-q38d/ledger.txt`, perplexity in
+`/root/models/ppl-q38d/`.
+
+| | `q38d-eval` | `balanced` (control) |
+|---|---|---|
+| tg / pp, 1 stream | **33.17** / **314.2** | 30.94 / 294.9 |
+| 2-stream aggregate | **16.56** | 16.11 |
+| draft acceptance, 2 streams | **0.901** | 0.847 |
+| **reason-eval-hard** | 10/10, 0 TRUNC, **169 s, 16.6k** | 10/10, 0 TRUNC, 205 s, 20.5k |
+| code-eval-claude | 6/6, **102 s, 31 turns**, 3.2k think | 6/6, 118 s, 33 turns, 4.1k think |
+| vision | 4/4, 24 s | 4/4, 29 s |
+| code-eval-hard | 6/6, **186 s, 30 turns** | 6/6, 192 s, 31 turns |
+| perplexity | **1.9896** +/- 0.02410 | 2.0079 +/- 0.02453 |
+
+Paired perplexity, chunks 20-80: **candidate lower at 61 of 61, zero flips,
+-0.91%** - the "solid" row of step 7, not the wash that TD-Q6 against Ornith
+was. `balanced` reproduced 2.0079 to four decimals for the fourth time.
+Both control rows also reproduce `balanced`'s 09-08 record closely (10/10 in
+205 s against 204 s, 20.5k chars both times), so the session is sound.
+
+### Step 4 reversed step 3's throughput reading
+
+On the spare port the candidate trailed `balanced` by ~4% on acceptance-driven
+tg; through the router it LEADS by 7.2% single-stream and 2.8% at two streams,
+with the higher acceptance (0.901 against 0.847). Same binary, same n_max, same
+session day. What differs is the prompt: the sweep drafts continuations of
+`llama-context.cpp` with `ignore_eos`, the probes and every eval tier run chat
+completions under the template. Acceptance is content-dependent, and on the
+workload this box actually serves the candidate's head does at least as well as
+`balanced`'s. Third time the spare port has disagreed with production here
+(after the n-max 2 vs 3 tie and the Ornith task result). The prefill gap seen
+on the spare port is also absent through the router (314 against 295).
+
+### Verdict: it can take `balanced`, after a soak
+
+It matches `balanced` on every quality tier - including the one that
+discriminates, with 18% less wall clock and 19% less reasoning - and beats it on
+paired perplexity at 61 of 61. It is lighter in turns on both coding tiers and
+faster on the production path. There is no axis on which `balanced` wins in
+this session.
+
+It is not the apexmtp trap (best perplexity, worst reasoning): apexmtp's
+perplexity came with 5/10 and five truncations, this one's with 10/10 and zero,
+leaner than the incumbent.
+
+Not run: step 6 (identical attention layout, so prefill at depth is known from
+`balanced`; resident footprint after a first request still to be read during
+the soak) and step 8 (nothing failed, so there is no tier question). **Step 9 is
+owed before promotion** - more than 30 minutes of real agentic traffic crossing
+67k and 100k accumulated tokens on this exact file, watching `journalctl -k` on
+pve2. `balanced` itself has never been soaked on its Q6_K tier either, so
+swapping does not give up a proven config.
