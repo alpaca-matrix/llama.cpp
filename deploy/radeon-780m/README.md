@@ -47,6 +47,7 @@ Ranked by measured effect:
 | `parallel = 3` + `kv-unified` + `cache-ram` | keeps agent prefix cached across interleaved requests; third slot added 2026-08-11 for a second independent client |
 | `spec-draft-p-min = 0.3` on `fast` | +2% generation; acceptance 0.82 -> 0.85-0.87 (see fast-opt-plan notes below) |
 | `spec-draft-type-k/v = q8_0` on `fast` | 0% speed, halves the MTP draft KV; kept for the memory |
+| Tiled-transpose CONCAT (upstream PR 30591, ported 2026-10-21) | +12-16% prompt processing on the Qwen3.x GDN hybrids at 4k-16k; generation flat |
 
 Note the second and third interact: the optimal ubatch changed when Mesa was
 upgraded. Retune ubatch after any driver change.
@@ -759,6 +760,59 @@ Note `coder` peaked at 32.94 GiB GTT even at d65536. qwen3next runs full
 attention on only 12 of 48 layers, the rest being GDN with context-independent
 recurrent state, so its q8_0 KV at that depth costs roughly 800 MiB rather than
 several GiB. Do not generalize that headroom to conventional-attention models.
+
+### Tiled-transpose CONCAT and upstream PR 30591 (2026-10-21)
+
+Applied. Found by profiling prefill with `GGML_VK_PERF_LOGGER=1` on `balanced`
+while checking whether the gated-delta-net recurrence was worth a chunked
+kernel. It was not: GATED_DELTA_NET is 9.1% of summed per-op prefill time at
+pp4096 and 7.0% at pp16384. CONCAT was the surprise at 8.3% and 15.7%.
+
+The source is `build_conv_state` (`src/models/delta-net-base.cpp`): every GDN
+layer concatenates its 3-token conv state with a transposed `qkv_mixed`
+`[2048, 8192]`. The generic concat shader writes along tokens and reads src1
+with a 32 KB stride per thread. It cost 17-42 ms per layer per 2048-token
+ubatch for ~67 MB of data, and the per-call cost differed between runs with
+different context sizes while staying flat within a run. Never explained; the
+fix removed it.
+
+PR 30591 (0cc4m, from a fix by Nathanw1014; head `52e41a4`) adds a 32x32
+shared-memory tile shader for dim-0 concat with a transposed src1. Ported as
+`bec8b9c` - the pipeline selection is adapted to this tree's older concat code,
+the shader is verbatim. `test-backend-ops -o CONCAT` passes 132/132 on the
+780M, including the PR's 20 transposed cases.
+
+A/B on `ornith15-q6-eval`, baseline `f981494` vs `bec8b9c` built from the same
+base, `llama-bench -ub 2048 -b 2048 -ctk q8_0 -ctv q8_0 -fa 1 -ngl 99 -t 8 -r 3`,
+ABBA-interleaved, every other guest on pve2 stopped except VM 207:
+
+| test | baseline | port | delta |
+|---|---|---|---|
+| pp512 | 305.1 | 310.8 | +1.9% |
+| pp4096 | 310.0 | 358.2 | +15.5% |
+| pp16384 | 269.2 | 300.4 | +11.6% |
+| pp32768 | 226.9 | 244.9 | +7.9% |
+| tg128 | 24.18 | 24.09 | -0.4% |
+
+The baseline was noisy between runs (pp4096 295-334) where the port held
+within 0.5%, so the mid-range deltas carry +/-2-3 points; against the best
+baseline run the port is still +7%. CONCAT went from 23-31 ms to 2.6 ms per
+call and no other op moved. Served with MTP (n-max 2, 15.6k-token code prompt,
+standalone on 8081): prompt 236 -> 275 t/s (+16%), generation and draft
+acceptance identical, output character-identical at temperature 0.
+
+Upstream measured +32% on a Radeon 8060S; the gain here is half that and fades
+at 32k, where attention takes a larger share. Untested: the router path with
+mmproj loaded, and depths past 32k. The PR was still open when ported - expect
+a conflict in the same hunks at the next upstream sync, resolved by taking
+upstream.
+
+**Keep the method.** The suspected bottleneck (GDN) was below threshold; the
+real one was a generic copy op next to it, invisible until every op in the
+perf log was counted. A first aggregation script dropped the `MUL_MAT ... :`
+and `FLASH_ATTN_EXT dst(...)` lines and inflated every other share, which made
+GDN look like 13-15%. Parse every `<name>: N x t us = T us` line and key on the
+first token.
 
 ### Greedy decode is not reproducible on `coder`
 
