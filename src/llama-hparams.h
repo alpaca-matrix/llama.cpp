@@ -150,6 +150,9 @@ struct llama_hparams {
     // note: using uint32_t type for compatibility reason
     std::array<uint32_t, LLAMA_MAX_LAYERS> is_swa_impl;
 
+    // if rope_pattern[il] == 0, then layer il is NoPE (no rotary embedding)
+    std::array<uint32_t, LLAMA_MAX_LAYERS> rope_pattern;
+
     // for hybrid state space models
     std::array<uint32_t, LLAMA_MAX_LAYERS> is_recr_impl;
 
@@ -311,6 +314,8 @@ struct llama_hparams {
     bool is_swa_any() const;
 
     bool is_swa(uint32_t il) const;
+
+    bool has_rope(uint32_t il) const;
 
     bool is_indexer_full(uint32_t il) const;
 

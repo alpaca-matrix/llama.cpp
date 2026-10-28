@@ -105,6 +105,8 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
             return new llama_model_qwen2moe(params);
         case LLM_ARCH_QWEN3:
             return new llama_model_qwen3(params);
+        case LLM_ARCH_FLINT:
+            return new llama_model_flint(params);
         case LLM_ARCH_QWEN3MOE:
             return new llama_model_qwen3moe(params);
         case LLM_ARCH_QWEN3VL:
@@ -1133,6 +1135,7 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
     std::fill(hparams.n_ff_arr.begin(),      hparams.n_ff_arr.end(),      0);
 
     std::fill(hparams.rope_sections.begin(), hparams.rope_sections.end(), 0);
+    std::fill(hparams.rope_pattern.begin(),  hparams.rope_pattern.end(), 1);
     std::fill(hparams.is_swa_impl.begin(),   hparams.is_swa_impl.end(), 0);
     std::fill(hparams.is_recr_impl.begin(),  hparams.is_recr_impl.end(),  llm_arch_is_recurrent(ml.get_arch()) ? 1 : 0);
     std::fill(hparams.is_indexer_full_impl.begin(), hparams.is_indexer_full_impl.end(), 0);
@@ -2566,6 +2569,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_DREAM:
         case LLM_ARCH_QWEN2MOE:
         case LLM_ARCH_QWEN3:
+        case LLM_ARCH_FLINT:
         case LLM_ARCH_QWEN3MOE:
         case LLM_ARCH_LLADA_MOE:
         case LLM_ARCH_RND1:

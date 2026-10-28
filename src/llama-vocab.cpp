@@ -496,6 +496,13 @@ struct llm_tokenizer_bpe : llm_tokenizer {
                     "[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\\r\\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+",
                 };
                 break;
+            case LLAMA_VOCAB_PRE_TYPE_FLINT:
+                regex_exprs = {
+                    "\p{N}{1,3}",
+                    "[一-龥぀-ゟ゠-ヿ]+",
+                    "[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?| ?[\p{P}\p{S}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+",
+                };
+                break;
             case LLAMA_VOCAB_PRE_TYPE_LAGUNA:
                 regex_exprs = {
                     "[^\\n]+|[\\n]+",
@@ -2351,6 +2358,9 @@ void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
                 tokenizer_pre == "afmoe") {
                 pre_type = LLAMA_VOCAB_PRE_TYPE_AFMOE;
                 clean_spaces = false;
+            } else if (tokenizer_pre == "flint") {
+                pre_type = LLAMA_VOCAB_PRE_TYPE_FLINT;
+                clean_spaces = false;
             } else if (
                 tokenizer_pre == "laguna") {
                 pre_type = LLAMA_VOCAB_PRE_TYPE_LAGUNA;
@@ -2811,6 +2821,7 @@ void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
                     || t.first == "[EOT]" // Kimi-K2
                     || t.first == "[EOS]" // Kimi-K2
                     || t.first == "<|end_of_text|>"
+                    || (pre_type == LLAMA_VOCAB_PRE_TYPE_FLINT && (t.first == "<|user|>" || t.first == "<|observation|>"))
                     || t.first == "<end_of_utterance>" // smoldocling
                     || t.first == "<eos>"            // gemma4
                     || t.first == "<turn|>"          // gemma4
