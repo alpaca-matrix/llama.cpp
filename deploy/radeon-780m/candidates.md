@@ -5200,3 +5200,40 @@ Perplexity (different tokenizer, no paired comparison exists), the coding tiers,
 vision (no mmproj), step 6 depth, the soak, and any spec-decoding (none to try).
 Verdict: promising on reasoning, slower per answer than the incumbent; not
 promoted, eval slot only.
+
+### Flint, coding tiers and perplexity (2026-10-28, same session as above)
+
+Other Proxmox guests were RUNNING for this part (only the hard-reasoning table
+above had them stopped), so wall-clock is contended; turns, verdicts and
+perplexity are not. Both models ran under the same contention. Ornith 1.5 ran
+with MTP n-max 2 as in production, Flint has nothing to speculate with.
+
+| tier | Flint UD-Q6_K_XL | Ornith 1.5 Q6_K |
+|---|---|---|
+| code-eval (easy) | 4/4, 17 turns, 89 s | 4/4, 19 turns, 165 s |
+| code-eval-hard | 6/6, 27 turns, 161 s | 5/6, 25 turns, 328 s (hidden-call failed) |
+| code-eval-claude (anthropic) | 6/6, 39 turns, 124 s | 6/6, 61 turns, 232 s |
+
+Zero edit misses and zero botched tool calls on both, line-number trap clean on
+Flint. Flint wins every quality axis measured; the cost is speed per served
+token (no MTP) and about 2x the reasoning on the hard-reasoning tier.
+
+Perplexity, `ppl-holdout-ornith.txt`, c 512, 80 chunks. The tokenizers differ
+(Flint 3.602 bytes/token, Ornith 3.273), so raw PPL is not comparable:
+
+| | PPL | bits per byte (approx) |
+|---|---|---|
+| Flint, this port | 3.9403 +/- 0.085 | 0.549 |
+| Flint, upstream PR 30928 build | 4.0330 +/- 0.088 | 0.559 |
+| Ornith 1.5 Q6_K | 2.1352 +/- 0.028 | 0.334 |
+
+The upstream build was run to check the port: it is faithful (the port is, if
+anything, 2% lower; both within error, and the unported F16 amax rescale is
+the likely source of the small difference). So the gap to Ornith belongs to
+the model on this corpus, which is the Ornith family's own holdout text and
+favours it. Do not read it as a quality verdict: it disagrees with every
+behavioural tier, which is the same inversion recorded for apexmtp (step 7
+never promotes anything).
+
+Still owed before promotion: the soak, and a decision on MTP-less speed
+(served tg is lower than production's ~34). Eval slot only.
