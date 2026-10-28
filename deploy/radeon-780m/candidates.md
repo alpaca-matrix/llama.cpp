@@ -5156,3 +5156,47 @@ owed before promotion** - more than 30 minutes of real agentic traffic crossing
 67k and 100k accumulated tokens on this exact file, watching `journalctl -k` on
 pve2. `balanced` itself has never been soaked on its Q6_K tier either, so
 swapping does not give up a proven config.
+
+## Flint (RecursiveSI/flint), 2026-10-28
+
+Vetted and ported same day. The card is first-party, Apache 2.0, trained from
+scratch; every benchmark on it is self-reported. Arch `flint`: 49 layers (2 dense,
+47 MoE), 256 routed experts / 6 used plus a shared expert, 35 SWA layers (513
+window) and 14 full-attention layers that carry no RoPE, attention sinks, no MTP
+head. Upstream llama.cpp support is PR 30928 (merged 2026-10-21); this fork
+predates the PR's parent, so it was ported by hand on branch `flint-port`
+(commits 9d05bb6, 176191d, 619ae4f). Not ported: the PR's F16 amax rescale in the
+MoE down-projection. Three things bit during the port: a regex written with
+single backslashes, `ggml_build_forward_expand` missing from the graph builder
+(this tree needs it; the PR tree does not), and the jinja lexer rejecting the
+template's "\x00" escape (worked around with `flint-chat-template.jinja`).
+
+Tier: unsloth UD-Q6_K_XL, 36.3 GB / 33.82 GiB, hash matches Hugging Face.
+
+### Measured, one session, other Proxmox guests stopped, KV q8_0, ub 2048
+
+| llama-bench, unspeculated | Flint UD-Q6_K_XL | Ornith 1.5 Q6_K |
+|---|---|---|
+| pp512 | 311.79 | 306.97 |
+| pp4096 | 393.73 | 358.98 |
+| tg128 | 27.55 | 24.01 |
+
+Production Ornith runs MTP at n-max 2, so its served tg is higher than this
+column (about 34); Flint has no MTP head and nothing to speculate with.
+
+| reason-eval-hard, MAX_TOKENS 8000 | Flint | Ornith 1.5 Q6_K (MTP n-max 2) |
+|---|---|---|
+| correct | 8/10 | 6/10 |
+| truncated | 2 (store-buffer, late-binding) | 1 (store-buffer) |
+| wall clock | 880 s | 482 s |
+| reasoning | 84.8k chars | 43.2k chars |
+
+Ornith's three FAILs include `recursion-tree`, where the boxed answer reads like
+the right one, so check the scorer's `anti` pattern before leaning on that gap.
+
+### Not done
+
+Perplexity (different tokenizer, no paired comparison exists), the coding tiers,
+vision (no mmproj), step 6 depth, the soak, and any spec-decoding (none to try).
+Verdict: promising on reasoning, slower per answer than the incumbent; not
+promoted, eval slot only.
