@@ -5237,3 +5237,55 @@ never promotes anything).
 
 Still owed before promotion: the soak, and a decision on MTP-less speed
 (served tg is lower than production's ~34). Eval slot only.
+
+### Flint quant search (2026-11-06): the experts are not the bytes
+
+`bytes-per-token.py` on the Unsloth UD-Q6_K_XL (2.556 GB/token, ceiling 27.4,
+measured 27.55) shows only 31% of per-token traffic is routed experts. Attention
+is 38% (all Q8_0), shared expert and dense FFN 17% (Q8_0), the output head 13%
+(Q8_0). Routed experts are Q6_K gate/up and Q8_0 down. Off-the-shelf lower
+quants therefore buy little (bartowski Q4_K_M predicts ~29, Unsloth UD-Q4_K_XL
+~25-27 because it uses IQ types); the lever is the non-expert tensors.
+
+Built two files from the local Q6_K_XL with `pin-tensor-types.py` +
+`llama-quantize --allow-requantize --imatrix` (bartowski's imatrix), all other
+tensors byte-exact: both set shexp/dense FFN to Q5_K, expert down to Q6_K, head
+to Q6_K. **trimA** = attn q/k/v/output Q5_K. **trimB** = attn q/k/v Q4_K,
+output Q5_K (APEX's attention recipe over Q6 experts). Also fetched IsValorum
+`Flint-APEX-I-MiniPlus-V2.1` (14.77 GiB, IQ3_XXS experts, Q4_K attention).
+
+llama-bench, c3 runs, KV q8_0, ub 2048, other guests UP (contended: the
+baseline repeated at the end read 24.37 against 27.33 at the start, so trust
+the ordering, not absolute figures):
+
+| file | GiB | predicted ceiling | pp4096 | tg128 |
+|---|---|---|---|---|
+| UD-Q6_K_XL | 33.8 | 27.4 | 392.5 | 27.33 (24.37 repeat) |
+| trimA | 30.5 | 36.4 | 384.6 | 34.23 |
+| trimB | 30.4 | 37.6 | 383.9 | 34.61 |
+| APEX Mini+ | 14.8 | 45.8 | 454.6 | 41.91 |
+
+Mini+ ran FASTER than the model's 20% IQ discount predicted (41.9 against ~37).
+
+Quality, same session, no MTP: reason-eval-hard / code-eval-hard /
+code-eval-claude (turns) / PPL (80 x 512 chunks, same tokenizer so comparable):
+
+| file | reason-hard | code-hard | code-claude | PPL |
+|---|---|---|---|---|
+| UD-Q6_K_XL (earlier session) | 8/10, 2 trunc | 6/6, 27 turns | 6/6, 39 turns | 3.9403 |
+| trimB | 10/10, 0 trunc | 6/6, 25 | 6/6, 47 | 3.7623 |
+| trimA | 9/10, 1 trunc | 6/6, 31 | 6/6, 43 | 4.0397 |
+| APEX Mini+ | 9/10, 1 trunc | 6/6, 26 | 6/6, 33 | 3.8193 |
+
+Paired PPL vs Q6_K_XL: trimB and Mini+ lower at 61/61 with no flips, trimA
+HIGHER at 61/61. Do not read that as quality: trimA has the stronger attention
+yet the worst PPL, and PPL has inverted capability here before (apexmtp).
+trimA 9/10 against trimB 10/10 is also inside noise at N=10. What the tiers do
+support is that none of the three lost anything measurable; they do not rank
+them. Not run: vision (no mmproj exists), the soak, depth sweeps, a second
+reasoning pass to size the noise.
+
+Verdict: the finding is that Flint's speed was being left on the table by a
+high-precision non-expert tensor mix. APEX Mini+ is the fastest (+53% tg, +16%
+pp4096, half the memory) and passed everything; trimB keeps Q6 experts for +27%.
+Neither is promoted. Files: /root/models/EVAL-flint-{trimA,trimB,APEX-MiniPlus}.gguf.
